@@ -91,16 +91,12 @@ fn attention_mixer(input: int, prefix: string, position: int, incremental: bool)
 
     let k_full: int = repeat_kv(k_all);
     let v_full: int = repeat_kv(v_all);
-    let k_t: int = torch::tensor::transpose(k_full, -2, -1);
-    let raw_scores: int = torch::tensor::matmul(q_rot, k_t);
-    let scores: int = torch::tensor::mul_scalar(raw_scores, 0.125);
-    let mut masked: int = torch::tensor::to_float(scores);
-    if !incremental {
-        masked = torch::tensor::add(masked, torch::tensor::causal_mask(seq_len));
-    }
-    let softmaxed: int = torch::tensor::softmax(masked, -1);
-    let probs: int = torch::tensor::to_bfloat16(softmaxed);
-    let attended: int = torch::tensor::matmul(probs, v_full);
+    let attended: int = torch::nn::scaled_dot_product_attention(
+        q_rot,
+        k_full,
+        v_full,
+        !incremental
+    );
     let transposed: int = torch::tensor::transpose(attended, 1, 2);
     let contiguous: int = torch::tensor::contiguous(transposed);
     let merged: int = torch::tensor::view3(

@@ -192,13 +192,7 @@ impl TorchHostRuntime {
             .lock()
             .map_err(|_| anyhow!("Torch execution lock is poisoned"))?;
         self.lock()?.begin(image, mask, args);
-        let mut vm = Vm::new_shared_with_jit_config(
-            program,
-            JitConfig {
-                enabled: false,
-                ..JitConfig::default()
-            },
-        );
+        let mut vm = Vm::new_shared_with_jit_config(program, torch_jit_config());
         self.bind(&mut vm);
         let status = vm.run().map_err(|err| anyhow!(err.to_string()))?;
         if status != VmStatus::Halted {
@@ -217,13 +211,7 @@ impl TorchHostRuntime {
             .lock()
             .map_err(|_| anyhow!("Torch execution lock is poisoned"))?;
         self.lock()?.begin_args(args);
-        let mut vm = Vm::new_shared_with_jit_config(
-            program,
-            JitConfig {
-                enabled: false,
-                ..JitConfig::default()
-            },
-        );
+        let mut vm = Vm::new_shared_with_jit_config(program, torch_jit_config());
         self.bind(&mut vm);
         let status = vm.run().map_err(|err| anyhow!(err.to_string()))?;
         if status != VmStatus::Halted {
@@ -248,6 +236,14 @@ impl TorchHostRuntime {
                 }),
             );
         }
+    }
+}
+
+fn torch_jit_config() -> JitConfig {
+    JitConfig {
+        hot_loop_threshold: 1,
+        max_trace_len: 512,
+        ..JitConfig::default()
     }
 }
 
@@ -359,6 +355,10 @@ const HOST_OPS: &[(&str, HostOp)] = &[
     ("torch::tensor::avg_pool2d_2", tensor_avg_pool2d_2),
     ("torch::nn::embedding", nn_embedding),
     ("torch::nn::linear", nn_linear),
+    (
+        "torch::nn::scaled_dot_product_attention",
+        nn_scaled_dot_product_attention,
+    ),
     ("torch::nn::conv1d", nn_conv1d),
     ("torch::nn::conv2d", nn_conv2d),
     ("torch::nn::conv_transpose2d", nn_conv_transpose2d),
@@ -1113,6 +1113,27 @@ fn nn_linear(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome
         Some(bias) => input.linear(&weight, Some(&bias)),
         None => input.linear(&weight, None::<&Tensor>),
     };
+    return_tensor(context, output)
+}
+
+fn nn_scaled_dot_product_attention(
+    context: &mut TorchContext,
+    args: &[Value],
+) -> VmResult<CallOutcome> {
+    let query = context.tensor(int_arg(args, 0, "query")?)?.shallow_clone();
+    let key = context.tensor(int_arg(args, 1, "key")?)?.shallow_clone();
+    let value = context.tensor(int_arg(args, 2, "value")?)?.shallow_clone();
+    let is_causal = bool_arg(args, 3, "is_causal")?;
+    let output = Tensor::scaled_dot_product_attention(
+        &query,
+        &key,
+        &value,
+        None::<&Tensor>,
+        0.0,
+        is_causal,
+        None,
+        false,
+    );
     return_tensor(context, output)
 }
 

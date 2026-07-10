@@ -14,7 +14,7 @@ koharu-runtime = { git = "https://github.com/mayocream/koharu.git", branch = "re
 koharu-torch = { git = "https://github.com/mayocream/koharu.git", branch = "refactor/0705", package = "koharu-torch" }
 tokenizers = "0.22"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-vm = { package = "pd-vm", path = "../rustscript", default-features = false, features = ["runtime"] }
+vm = { package = "pd-vm", path = "../rustscript", default-features = false, features = ["runtime", "cranelift-jit"] }
 
 [dev-dependencies]
 tempfile = "3"
