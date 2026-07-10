@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use koharu_torch::{Device, Kind, Tensor};
@@ -44,6 +45,8 @@ struct TorchContext {
     args: Vec<String>,
     output: Option<i64>,
     text_output: Option<String>,
+    generation_started_at: Option<Instant>,
+    generated_tokens: Option<i64>,
     next_tensor: i64,
     next_pair: i64,
 }
@@ -95,6 +98,8 @@ impl TorchContext {
         self.inputs.clear();
         self.output = None;
         self.text_output = None;
+        self.generation_started_at = None;
+        self.generated_tokens = None;
         self.args = args;
         self.next_tensor = 1;
         self.next_pair = 1;
@@ -115,17 +120,28 @@ impl TorchContext {
         self.args.clear();
         self.output = None;
         self.text_output = None;
+        self.generation_started_at = None;
+        self.generated_tokens = None;
         Ok(output)
     }
 
-    fn finish_text(&mut self) -> String {
-        let output = self.text_output.take().unwrap_or_default();
+    fn finish_text(&mut self) -> ScriptTextOutput {
+        let text = self.text_output.take().unwrap_or_default();
+        let elapsed = self
+            .generation_started_at
+            .take()
+            .map(|start| start.elapsed());
+        let generated_tokens = self.generated_tokens.take();
         self.tensors.clear();
         self.pairs.clear();
         self.inputs.clear();
         self.args.clear();
         self.output = None;
-        output
+        ScriptTextOutput {
+            text,
+            generated_tokens,
+            elapsed,
+        }
     }
 }
 
@@ -149,6 +165,8 @@ impl TorchHostRuntime {
                 args: Vec::new(),
                 output: None,
                 text_output: None,
+                generation_started_at: None,
+                generated_tokens: None,
                 next_tensor: 1,
                 next_pair: 1,
             })),
@@ -177,7 +195,11 @@ impl TorchHostRuntime {
         self.lock()?.finish()
     }
 
-    pub(crate) fn run_text(&self, program: Arc<Program>, args: Vec<String>) -> Result<String> {
+    pub(crate) fn run_text(
+        &self,
+        program: Arc<Program>,
+        args: Vec<String>,
+    ) -> Result<ScriptTextOutput> {
         let _execution = self
             .execution
             .lock()
@@ -215,6 +237,12 @@ pub struct TorchScriptRunner {
     runtime: TorchHostRuntime,
 }
 
+pub struct ScriptTextOutput {
+    pub text: String,
+    pub generated_tokens: Option<i64>,
+    pub elapsed: Option<Duration>,
+}
+
 impl TorchScriptRunner {
     pub async fn new(device: Device) -> Result<Self> {
         crate::preload_libtorch()
@@ -225,7 +253,7 @@ impl TorchScriptRunner {
         })
     }
 
-    pub fn run_text(&self, program: Arc<Program>, args: Vec<String>) -> Result<String> {
+    pub fn run_text(&self, program: Arc<Program>, args: Vec<String>) -> Result<ScriptTextOutput> {
         self.runtime.run_text(program, args)
     }
 }
@@ -236,6 +264,8 @@ const HOST_OPS: &[(&str, HostOp)] = &[
     ("torch::runtime::input", runtime_input),
     ("torch::runtime::set_output", runtime_set_output),
     ("torch::runtime::set_text_output", runtime_set_text_output),
+    ("torch::runtime::start_timer", runtime_start_timer),
+    ("torch::runtime::set_token_count", runtime_set_token_count),
     ("torch::tokenizer::load", tokenizer_load),
     ("torch::tokenizer::encode_chat", tokenizer_encode_chat),
     (
@@ -436,6 +466,24 @@ fn runtime_set_output(context: &mut TorchContext, args: &[Value]) -> VmResult<Ca
 fn runtime_set_text_output(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
     let text = string_arg(args, 0, "text")?.to_owned();
     context.text_output = Some(text);
+    return_value(Value::Bool(true))
+}
+
+fn runtime_start_timer(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    if !args.is_empty() {
+        return Err(host_error("start_timer takes no arguments"));
+    }
+    context.generation_started_at = Some(Instant::now());
+    context.generated_tokens = None;
+    return_value(Value::Bool(true))
+}
+
+fn runtime_set_token_count(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let generated_tokens = int_arg(args, 0, "generated tokens")?;
+    if generated_tokens < 0 {
+        return Err(host_error("generated token count must be non-negative"));
+    }
+    context.generated_tokens = Some(generated_tokens);
     return_value(Value::Bool(true))
 }
 

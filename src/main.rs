@@ -29,8 +29,14 @@ async fn main() -> Result<()> {
         .map_err(|err| anyhow!("failed to compile {}: {err}", cli.script.display()))?;
     let runner = TorchScriptRunner::new(device).await?;
     let output = runner.run_text(Arc::new(compiled.program), cli.args)?;
-    if !output.is_empty() {
-        println!("{output}");
+    if !output.text.is_empty() {
+        println!("{}", output.text);
+    }
+    if let (Some(tokens), Some(elapsed)) = (output.generated_tokens, output.elapsed) {
+        let seconds = elapsed.as_secs_f64();
+        if tokens > 0 && seconds > 0.0 {
+            println!("tokens/s: {:.2}", tokens as f64 / seconds);
+        }
     }
     Ok(())
 }

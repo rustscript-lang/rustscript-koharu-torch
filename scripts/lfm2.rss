@@ -187,10 +187,13 @@ let prompt_tokens: int = torch::tokenizer::encode_chat(system_prompt, source_tex
 let prompt_len: int = torch::tensor::size(prompt_tokens, 1);
 let mut tokens: int = prompt_tokens;
 let mut step: int = 0;
+let mut generated_tokens: int = 0;
+let timer_started: bool = torch::runtime::start_timer();
 while step < max_new_tokens {
     let logits: int = model(tokens);
     let next_token: int = torch::tensor::argmax_int(logits, -1);
     tokens = torch::tokenizer::append_token(tokens, next_token);
+    generated_tokens = generated_tokens + 1;
     if torch::tokenizer::is_eos(next_token) {
         break;
     }
@@ -198,4 +201,5 @@ while step < max_new_tokens {
 }
 
 let output_text: string = torch::tokenizer::decode_generated(tokens, prompt_len);
+let counted: bool = torch::runtime::set_token_count(generated_tokens);
 let published: bool = torch::runtime::set_text_output(output_text);
