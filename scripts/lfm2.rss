@@ -51,7 +51,7 @@ fn repeat_kv(input: int) -> int {
     torch::tensor::repeat_interleave(input, 2, 1)
 }
 
-fn attention_mixer(input: int, prefix: string) -> int {
+fn attention_mixer(input: int, prefix: string, position: int, incremental: bool) -> int {
     let batch: int = torch::tensor::size(input, 0);
     let seq_len: int = torch::tensor::size(input, 1);
     let hidden: int = rms_norm(input, prefix + ".operator_norm.weight");
@@ -71,20 +71,33 @@ fn attention_mixer(input: int, prefix: string) -> int {
     let k_heads: int = torch::tensor::transpose(k_norm, 1, 2);
     let v_heads: int = torch::tensor::transpose(v_view, 1, 2);
 
-    let cos: int = torch::tensor::rope_cos(seq_len, 64, 1000000.0);
-    let sin: int = torch::tensor::rope_sin(seq_len, 64, 1000000.0);
+    let cos: int = torch::tensor::rope_cos_at(seq_len, 64, 1000000.0, position);
+    let sin: int = torch::tensor::rope_sin_at(seq_len, 64, 1000000.0, position);
     let q_rot: int = apply_rope(q_heads, cos, sin);
     let k_rot: int = apply_rope(k_heads, cos, sin);
 
-    let k_full: int = repeat_kv(k_rot);
-    let v_full: int = repeat_kv(v_heads);
+    let k_cache_name: string = prefix + ".self_attn.k_cache";
+    let v_cache_name: string = prefix + ".self_attn.v_cache";
+    let mut k_all: int = k_rot;
+    let mut v_all: int = v_heads;
+    if incremental {
+        let old_k: int = torch::cache::get(k_cache_name);
+        let old_v: int = torch::cache::get(v_cache_name);
+        k_all = torch::tensor::cat2(old_k, k_rot, 2);
+        v_all = torch::tensor::cat2(old_v, v_heads, 2);
+    }
+    let k_saved: bool = torch::cache::set(k_cache_name, k_all);
+    let v_saved: bool = torch::cache::set(v_cache_name, v_all);
+
+    let k_full: int = repeat_kv(k_all);
+    let v_full: int = repeat_kv(v_all);
     let k_t: int = torch::tensor::transpose(k_full, -2, -1);
     let raw_scores: int = torch::tensor::matmul(q_rot, k_t);
     let scores: int = torch::tensor::mul_scalar(raw_scores, 0.125);
-    let masked: int = torch::tensor::add(
-        torch::tensor::to_float(scores),
-        torch::tensor::causal_mask(seq_len)
-    );
+    let mut masked: int = torch::tensor::to_float(scores);
+    if !incremental {
+        masked = torch::tensor::add(masked, torch::tensor::causal_mask(seq_len));
+    }
     let softmaxed: int = torch::tensor::softmax(masked, -1);
     let probs: int = torch::tensor::to_bfloat16(softmaxed);
     let attended: int = torch::tensor::matmul(probs, v_full);
@@ -99,7 +112,7 @@ fn attention_mixer(input: int, prefix: string) -> int {
     linear(merged, prefix + ".self_attn.out_proj.weight")
 }
 
-fn conv_mixer(input: int, prefix: string) -> int {
+fn conv_mixer(input: int, prefix: string, incremental: bool) -> int {
     let seq_len: int = torch::tensor::size(input, 1);
     let hidden: int = rms_norm(input, prefix + ".operator_norm.weight");
     let projected: int = torch::tensor::transpose(
@@ -111,8 +124,16 @@ fn conv_mixer(input: int, prefix: string) -> int {
     let c_part: int = torch::tensor::narrow(projected, 1, 1024, 1024);
     let x_part: int = torch::tensor::narrow(projected, 1, 2048, 1024);
     let bx: int = torch::tensor::mul(b_part, x_part);
+    let state_name: string = prefix + ".conv.state";
+    let mut conv_input: int = bx;
+    let mut conv_start: int = 0;
+    if incremental {
+        let old_state: int = torch::cache::get(state_name);
+        conv_start = torch::tensor::size(old_state, 2);
+        conv_input = torch::tensor::cat2(old_state, bx, 2);
+    }
     let conv_full: int = torch::nn::conv1d(
-        bx,
+        conv_input,
         weight(prefix + ".conv.conv.weight"),
         0,
         1,
@@ -120,7 +141,12 @@ fn conv_mixer(input: int, prefix: string) -> int {
         1,
         1024
     );
-    let conv_trimmed: int = torch::tensor::narrow(conv_full, -1, 0, seq_len);
+    let state: int = torch::tensor::tail(conv_input, 2, 2);
+    let state_saved: bool = torch::cache::set(state_name, state);
+    let mut conv_trimmed: int = torch::tensor::narrow(conv_full, -1, 0, seq_len);
+    if incremental {
+        conv_trimmed = torch::tensor::narrow(conv_full, -1, conv_start, 1);
+    }
     let mixed: int = torch::tensor::transpose(
         torch::tensor::mul(c_part, conv_trimmed),
         -1,
@@ -145,36 +171,36 @@ fn finish_layer(input: int, prefix: string, mixed: int) -> int {
     torch::tensor::add(hidden, feed_forward)
 }
 
-fn conv_layer(input: int, prefix: string) -> int {
-    let mixed: int = conv_mixer(input, prefix);
+fn conv_layer(input: int, prefix: string, incremental: bool) -> int {
+    let mixed: int = conv_mixer(input, prefix, incremental);
     finish_layer(input, prefix, mixed)
 }
 
-fn attention_layer(input: int, prefix: string) -> int {
-    let mixed: int = attention_mixer(input, prefix);
+fn attention_layer(input: int, prefix: string, position: int, incremental: bool) -> int {
+    let mixed: int = attention_mixer(input, prefix, position, incremental);
     finish_layer(input, prefix, mixed)
 }
 
-fn model(input_ids: int) -> int {
+fn model(input_ids: int, position: int, incremental: bool) -> int {
     let embed_weight: int = weight("model.embed_tokens.weight");
     let embeddings: int = torch::nn::embedding(input_ids, embed_weight);
     let mut hidden: int = embeddings;
-    hidden = conv_layer(hidden, "model.layers.0");
-    hidden = conv_layer(hidden, "model.layers.1");
-    hidden = attention_layer(hidden, "model.layers.2");
-    hidden = conv_layer(hidden, "model.layers.3");
-    hidden = conv_layer(hidden, "model.layers.4");
-    hidden = attention_layer(hidden, "model.layers.5");
-    hidden = conv_layer(hidden, "model.layers.6");
-    hidden = conv_layer(hidden, "model.layers.7");
-    hidden = attention_layer(hidden, "model.layers.8");
-    hidden = conv_layer(hidden, "model.layers.9");
-    hidden = attention_layer(hidden, "model.layers.10");
-    hidden = conv_layer(hidden, "model.layers.11");
-    hidden = attention_layer(hidden, "model.layers.12");
-    hidden = conv_layer(hidden, "model.layers.13");
-    hidden = attention_layer(hidden, "model.layers.14");
-    hidden = conv_layer(hidden, "model.layers.15");
+    hidden = conv_layer(hidden, "model.layers.0", incremental);
+    hidden = conv_layer(hidden, "model.layers.1", incremental);
+    hidden = attention_layer(hidden, "model.layers.2", position, incremental);
+    hidden = conv_layer(hidden, "model.layers.3", incremental);
+    hidden = conv_layer(hidden, "model.layers.4", incremental);
+    hidden = attention_layer(hidden, "model.layers.5", position, incremental);
+    hidden = conv_layer(hidden, "model.layers.6", incremental);
+    hidden = conv_layer(hidden, "model.layers.7", incremental);
+    hidden = attention_layer(hidden, "model.layers.8", position, incremental);
+    hidden = conv_layer(hidden, "model.layers.9", incremental);
+    hidden = attention_layer(hidden, "model.layers.10", position, incremental);
+    hidden = conv_layer(hidden, "model.layers.11", incremental);
+    hidden = attention_layer(hidden, "model.layers.12", position, incremental);
+    hidden = conv_layer(hidden, "model.layers.13", incremental);
+    hidden = attention_layer(hidden, "model.layers.14", position, incremental);
+    hidden = conv_layer(hidden, "model.layers.15", incremental);
 
     let normalized: int = rms_norm(hidden, "model.embedding_norm.weight");
     let seq_len: int = torch::tensor::size(normalized, 1);
@@ -188,16 +214,25 @@ let prompt_len: int = torch::tensor::size(prompt_tokens, 1);
 let mut tokens: int = prompt_tokens;
 let mut step: int = 0;
 let mut generated_tokens: int = 0;
+let cache_cleared: bool = torch::cache::clear();
 let timer_started: bool = torch::runtime::start_timer();
+let mut logits: int = 0;
+if max_new_tokens > 0 {
+    logits = model(prompt_tokens, 0, false);
+}
 while step < max_new_tokens {
-    let logits: int = model(tokens);
     let next_token: int = torch::tensor::argmax_int(logits, -1);
     tokens = torch::tokenizer::append_token(tokens, next_token);
     generated_tokens = generated_tokens + 1;
+    step = step + 1;
     if torch::tokenizer::is_eos(next_token) {
         break;
     }
-    step = step + 1;
+    if step < max_new_tokens {
+        let decode_input: int = torch::tokenizer::single_token(next_token);
+        let decode_position: int = prompt_len + generated_tokens - 1;
+        logits = model(decode_input, decode_position, true);
+    }
 }
 
 let output_text: string = torch::tokenizer::decode_generated(tokens, prompt_len);

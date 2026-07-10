@@ -8,6 +8,7 @@ use koharu_torch::{Device, Kind, Tensor};
 use tokenizers::Tokenizer;
 use vm::{
     CallOutcome, CallReturn, HostArgsFunction, Program, Value, Vm, VmError, VmResult, VmStatus,
+    jit::JitConfig,
 };
 
 type HostOp = fn(&mut TorchContext, &[Value]) -> VmResult<CallOutcome>;
@@ -39,6 +40,7 @@ struct TorchContext {
     weights_path: Option<PathBuf>,
     tokenizer: Option<Tokenizer>,
     tokenizer_path: Option<PathBuf>,
+    cache: HashMap<String, Tensor>,
     tensors: HashMap<i64, Tensor>,
     pairs: HashMap<i64, FfcPair>,
     inputs: Vec<i64>,
@@ -96,6 +98,7 @@ impl TorchContext {
         self.tensors.clear();
         self.pairs.clear();
         self.inputs.clear();
+        self.cache.clear();
         self.output = None;
         self.text_output = None;
         self.generation_started_at = None;
@@ -117,6 +120,7 @@ impl TorchContext {
         self.tensors.clear();
         self.pairs.clear();
         self.inputs.clear();
+        self.cache.clear();
         self.args.clear();
         self.output = None;
         self.text_output = None;
@@ -135,6 +139,7 @@ impl TorchContext {
         self.tensors.clear();
         self.pairs.clear();
         self.inputs.clear();
+        self.cache.clear();
         self.args.clear();
         self.output = None;
         ScriptTextOutput {
@@ -159,6 +164,7 @@ impl TorchHostRuntime {
                 weights_path: None,
                 tokenizer: None,
                 tokenizer_path: None,
+                cache: HashMap::new(),
                 tensors: HashMap::new(),
                 pairs: HashMap::new(),
                 inputs: Vec::new(),
@@ -186,7 +192,13 @@ impl TorchHostRuntime {
             .lock()
             .map_err(|_| anyhow!("Torch execution lock is poisoned"))?;
         self.lock()?.begin(image, mask, args);
-        let mut vm = Vm::new_shared(program);
+        let mut vm = Vm::new_shared_with_jit_config(
+            program,
+            JitConfig {
+                enabled: false,
+                ..JitConfig::default()
+            },
+        );
         self.bind(&mut vm);
         let status = vm.run().map_err(|err| anyhow!(err.to_string()))?;
         if status != VmStatus::Halted {
@@ -205,7 +217,13 @@ impl TorchHostRuntime {
             .lock()
             .map_err(|_| anyhow!("Torch execution lock is poisoned"))?;
         self.lock()?.begin_args(args);
-        let mut vm = Vm::new_shared(program);
+        let mut vm = Vm::new_shared_with_jit_config(
+            program,
+            JitConfig {
+                enabled: false,
+                ..JitConfig::default()
+            },
+        );
         self.bind(&mut vm);
         let status = vm.run().map_err(|err| anyhow!(err.to_string()))?;
         if status != VmStatus::Halted {
@@ -266,6 +284,10 @@ const HOST_OPS: &[(&str, HostOp)] = &[
     ("torch::runtime::set_text_output", runtime_set_text_output),
     ("torch::runtime::start_timer", runtime_start_timer),
     ("torch::runtime::set_token_count", runtime_set_token_count),
+    ("torch::cache::clear", cache_clear),
+    ("torch::cache::has", cache_has),
+    ("torch::cache::get", cache_get),
+    ("torch::cache::set", cache_set),
     ("torch::tokenizer::load", tokenizer_load),
     ("torch::tokenizer::encode_chat", tokenizer_encode_chat),
     (
@@ -273,6 +295,7 @@ const HOST_OPS: &[(&str, HostOp)] = &[
         tokenizer_decode_generated,
     ),
     ("torch::tokenizer::append_token", tokenizer_append_token),
+    ("torch::tokenizer::single_token", tokenizer_single_token),
     ("torch::tokenizer::is_eos", tokenizer_is_eos),
     ("torch::weights::load", weights_load),
     ("torch::weights::get", weights_get),
@@ -289,6 +312,8 @@ const HOST_OPS: &[(&str, HostOp)] = &[
     ("torch::tensor::causal_mask", tensor_causal_mask),
     ("torch::tensor::rope_cos", tensor_rope_cos),
     ("torch::tensor::rope_sin", tensor_rope_sin),
+    ("torch::tensor::rope_cos_at", tensor_rope_cos_at),
+    ("torch::tensor::rope_sin_at", tensor_rope_sin_at),
     ("torch::tensor::add", tensor_add),
     ("torch::tensor::sub", tensor_sub),
     ("torch::tensor::mul", tensor_mul),
@@ -308,6 +333,7 @@ const HOST_OPS: &[(&str, HostOp)] = &[
     ("torch::tensor::stack2", tensor_stack2),
     ("torch::tensor::chunk", tensor_chunk),
     ("torch::tensor::narrow", tensor_narrow),
+    ("torch::tensor::tail", tensor_tail),
     ("torch::tensor::transpose", tensor_transpose),
     ("torch::tensor::unsqueeze", tensor_unsqueeze),
     ("torch::tensor::repeat_interleave", tensor_repeat_interleave),
@@ -487,6 +513,36 @@ fn runtime_set_token_count(context: &mut TorchContext, args: &[Value]) -> VmResu
     return_value(Value::Bool(true))
 }
 
+fn cache_clear(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    if !args.is_empty() {
+        return Err(host_error("cache clear takes no arguments"));
+    }
+    context.cache.clear();
+    return_value(Value::Bool(true))
+}
+
+fn cache_has(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let name = string_arg(args, 0, "name")?;
+    return_value(Value::Bool(context.cache.contains_key(name)))
+}
+
+fn cache_get(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let name = string_arg(args, 0, "name")?;
+    let tensor = context
+        .cache
+        .get(name)
+        .ok_or_else(|| host_error(format!("missing cache tensor '{name}'")))?
+        .shallow_clone();
+    return_tensor(context, tensor)
+}
+
+fn cache_set(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let name = string_arg(args, 0, "name")?.to_owned();
+    let tensor = context.tensor(int_arg(args, 1, "tensor")?)?.shallow_clone();
+    context.cache.insert(name, tensor);
+    return_value(Value::Bool(true))
+}
+
 fn tokenizer_load(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
     let path = PathBuf::from(string_arg(args, 0, "path")?);
     if context.tokenizer_path.as_deref() != Some(path.as_path()) {
@@ -560,6 +616,14 @@ fn tokenizer_append_token(context: &mut TorchContext, args: &[Value]) -> VmResul
     let len = i64::try_from(ids.len()).map_err(|_| host_error("token count out of range"))?;
     let output = Tensor::from_slice(&ids)
         .view([1, len])
+        .to_device(context.device);
+    return_tensor(context, output)
+}
+
+fn tokenizer_single_token(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let token = int_arg(args, 0, "token")?;
+    let output = Tensor::from_slice(&[token])
+        .view([1, 1])
         .to_device(context.device);
     return_tensor(context, output)
 }
@@ -657,16 +721,27 @@ fn tensor_causal_mask(context: &mut TorchContext, args: &[Value]) -> VmResult<Ca
 }
 
 fn tensor_rope_cos(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
-    rope_table(context, args, f32::cos)
+    rope_table(context, args, 0, f32::cos)
 }
 
 fn tensor_rope_sin(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
-    rope_table(context, args, f32::sin)
+    rope_table(context, args, 0, f32::sin)
+}
+
+fn tensor_rope_cos_at(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let start = int_arg(args, 3, "start")?;
+    rope_table(context, args, start, f32::cos)
+}
+
+fn tensor_rope_sin_at(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let start = int_arg(args, 3, "start")?;
+    rope_table(context, args, start, f32::sin)
 }
 
 fn rope_table(
     context: &mut TorchContext,
     args: &[Value],
+    start: i64,
     op: impl Fn(f32) -> f32,
 ) -> VmResult<CallOutcome> {
     let seq_len = usize::try_from(int_arg(args, 0, "seq_len")?)
@@ -680,7 +755,7 @@ fn rope_table(
         let mut row = vec![0.0f32; head_dim];
         for idx in 0..half {
             let exponent = (idx * 2) as f32 / head_dim as f32;
-            let angle = pos as f32 / theta.powf(exponent);
+            let angle = (start + pos as i64) as f32 / theta.powf(exponent);
             let value = op(angle);
             row[idx] = value;
             row[idx + half] = value;
@@ -821,6 +896,25 @@ fn tensor_narrow(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOut
     let start = int_arg(args, 2, "start")?;
     let len = int_arg(args, 3, "len")?;
     return_tensor(context, input.narrow(dim, start, len))
+}
+
+fn tensor_tail(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?;
+    let raw_dim = int_arg(args, 1, "dim")?;
+    let len = int_arg(args, 2, "len")?;
+    if len < 0 {
+        return Err(host_error("tail length must be non-negative"));
+    }
+    let rank = i64::try_from(input.size().len()).map_err(|_| host_error("rank out of range"))?;
+    let dim = if raw_dim < 0 { rank + raw_dim } else { raw_dim };
+    let dim_index = usize::try_from(dim).map_err(|_| host_error("dimension is out of range"))?;
+    let dim_size = *input
+        .size()
+        .get(dim_index)
+        .ok_or_else(|| host_error(format!("dimension {dim} is out of range")))?;
+    let actual_len = len.min(dim_size);
+    let output = input.narrow(dim, dim_size - actual_len, actual_len);
+    return_tensor(context, output)
 }
 
 fn tensor_transpose(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
