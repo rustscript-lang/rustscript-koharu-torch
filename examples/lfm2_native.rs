@@ -31,6 +31,9 @@ struct Cli {
 
     #[arg(long)]
     profile: bool,
+
+    #[arg(long)]
+    ignore_eos: bool,
 }
 
 struct Lfm2Native {
@@ -39,6 +42,8 @@ struct Lfm2Native {
     k_cache: HashMap<usize, Tensor>,
     v_cache: HashMap<usize, Tensor>,
     conv_cache: HashMap<usize, Tensor>,
+    rope_cos_cache: Option<Tensor>,
+    rope_sin_cache: Option<Tensor>,
     profile: ProfileStats,
 }
 
@@ -64,7 +69,13 @@ async fn main() -> Result<()> {
         .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", cli.tokenizer.display()))?;
     let mut model = Lfm2Native::load(&cli.weights, device, cli.profile)?;
     let stats = koharu_torch::no_grad(|| {
-        model.generate(&tokenizer, &cli.system, &cli.text, cli.max_new_tokens)
+        model.generate(
+            &tokenizer,
+            &cli.system,
+            &cli.text,
+            cli.max_new_tokens,
+            cli.ignore_eos,
+        )
     })?;
     println!("{}", stats.text);
     println!("tokens: {}", stats.generated_tokens);
@@ -105,6 +116,8 @@ impl Lfm2Native {
             k_cache: HashMap::new(),
             v_cache: HashMap::new(),
             conv_cache: HashMap::new(),
+            rope_cos_cache: None,
+            rope_sin_cache: None,
             profile: ProfileStats {
                 enabled: profile,
                 entries: HashMap::new(),
@@ -118,6 +131,7 @@ impl Lfm2Native {
         system: &str,
         text: &str,
         max_new_tokens: usize,
+        ignore_eos: bool,
     ) -> Result<GenerationStats> {
         self.k_cache.clear();
         self.v_cache.clear();
@@ -146,7 +160,7 @@ impl Lfm2Native {
             let next_token = argmax_int(&logits);
             all_ids.push(next_token);
             generated_tokens += 1;
-            if next_token == 7 {
+            if !ignore_eos && next_token == 7 {
                 break;
             }
             if step + 1 < max_new_tokens {
@@ -298,8 +312,8 @@ impl Lfm2Native {
         let q_heads = q_norm.transpose(1, 2);
         let k_heads = k_norm.transpose(1, 2);
         let v_heads = v_view.transpose(1, 2);
-        let cos = rope_at(seq_len, 64, 1_000_000.0, position, self.device, f32::cos);
-        let sin = rope_at(seq_len, 64, 1_000_000.0, position, self.device, f32::sin);
+        let cos = self.rope_slice(seq_len, position, RopeKind::Cos);
+        let sin = self.rope_slice(seq_len, position, RopeKind::Sin);
         let q_rot = apply_rope(q_heads, &cos, &sin);
         let k_rot = apply_rope(k_heads, &cos, &sin);
 
@@ -428,6 +442,24 @@ impl Lfm2Native {
             .to_device(self.device)
     }
 
+    fn rope_slice(&mut self, seq_len: i64, start: usize, kind: RopeKind) -> Tensor {
+        let end = start as i64 + seq_len;
+        let device = self.device;
+        let cache = match kind {
+            RopeKind::Cos => &mut self.rope_cos_cache,
+            RopeKind::Sin => &mut self.rope_sin_cache,
+        };
+        let current_len = cache.as_ref().map(|tensor| tensor.size()[2]).unwrap_or(0);
+        if current_len < end {
+            let target_len = end.max(current_len.saturating_mul(2)).max(128);
+            *cache = Some(build_rope_table(target_len, 64, 1_000_000.0, device, kind));
+        }
+        cache
+            .as_ref()
+            .expect("rope cache should be initialized")
+            .narrow(2, start as i64, seq_len)
+    }
+
     fn profile_start(&self) -> Option<Instant> {
         if self.profile.enabled {
             sync_if_cuda(self.device);
@@ -452,6 +484,12 @@ impl Lfm2Native {
             println!("  {label}: {:.3} ms", duration.as_secs_f64() * 1000.0);
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum RopeKind {
+    Cos,
+    Sin,
 }
 
 fn encode_chat(tokenizer: &Tokenizer, system: &str, user: &str) -> Result<Vec<i64>> {
@@ -514,29 +552,31 @@ fn apply_rope(input: Tensor, cos: &Tensor, sin: &Tensor) -> Tensor {
     input * cos + rotated * sin
 }
 
-fn rope_at(
-    seq_len: i64,
+fn build_rope_table(
+    len: i64,
     head_dim: usize,
     theta: f32,
-    start: usize,
     device: Device,
-    op: fn(f32) -> f32,
+    kind: RopeKind,
 ) -> Tensor {
     let half = head_dim / 2;
-    let mut data = Vec::with_capacity(seq_len as usize * head_dim);
-    for pos in 0..seq_len as usize {
+    let mut data = Vec::with_capacity(len as usize * head_dim);
+    for pos in 0..len as usize {
         let mut row = vec![0.0f32; head_dim];
         for idx in 0..half {
             let exponent = (idx * 2) as f32 / head_dim as f32;
-            let angle = (start + pos) as f32 / theta.powf(exponent);
-            let value = op(angle);
+            let angle = pos as f32 / theta.powf(exponent);
+            let value = match kind {
+                RopeKind::Cos => angle.cos(),
+                RopeKind::Sin => angle.sin(),
+            };
             row[idx] = value;
             row[idx + half] = value;
         }
         data.extend(row);
     }
     Tensor::from_slice(&data)
-        .view([1, 1, seq_len, head_dim as i64])
+        .view([1, 1, len, head_dim as i64])
         .to_device(device)
         .to_kind(Kind::BFloat16)
 }

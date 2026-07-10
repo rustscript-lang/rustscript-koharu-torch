@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -34,13 +34,28 @@ struct FfcPair {
     global: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum RopeKind {
+    Cos,
+    Sin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct RopeCacheKey {
+    kind: RopeKind,
+    head_dim: usize,
+    theta_bits: u32,
+}
+
 struct TorchContext {
     device: Device,
     weights: HashMap<String, Tensor>,
+    weight_handles: HashMap<String, i64>,
     weights_path: Option<PathBuf>,
     tokenizer: Option<Tokenizer>,
     tokenizer_path: Option<PathBuf>,
     cache: HashMap<String, Tensor>,
+    rope_cache: HashMap<RopeCacheKey, Tensor>,
     tensors: HashMap<i64, Tensor>,
     pairs: HashMap<i64, FfcPair>,
     inputs: Vec<i64>,
@@ -99,6 +114,8 @@ impl TorchContext {
         self.pairs.clear();
         self.inputs.clear();
         self.cache.clear();
+        self.weight_handles.clear();
+        self.rope_cache.clear();
         self.output = None;
         self.text_output = None;
         self.generation_started_at = None;
@@ -121,6 +138,8 @@ impl TorchContext {
         self.pairs.clear();
         self.inputs.clear();
         self.cache.clear();
+        self.weight_handles.clear();
+        self.rope_cache.clear();
         self.args.clear();
         self.output = None;
         self.text_output = None;
@@ -140,6 +159,8 @@ impl TorchContext {
         self.pairs.clear();
         self.inputs.clear();
         self.cache.clear();
+        self.weight_handles.clear();
+        self.rope_cache.clear();
         self.args.clear();
         self.output = None;
         ScriptTextOutput {
@@ -161,10 +182,12 @@ impl TorchHostRuntime {
             context: Arc::new(Mutex::new(TorchContext {
                 device,
                 weights: HashMap::new(),
+                weight_handles: HashMap::new(),
                 weights_path: None,
                 tokenizer: None,
                 tokenizer_path: None,
                 cache: HashMap::new(),
+                rope_cache: HashMap::new(),
                 tensors: HashMap::new(),
                 pairs: HashMap::new(),
                 inputs: Vec::new(),
@@ -275,11 +298,13 @@ impl TorchScriptRunner {
 const HOST_OPS: &[(&str, HostOp)] = &[
     ("torch::runtime::arg", runtime_arg),
     ("torch::runtime::arg_int", runtime_arg_int),
+    ("torch::runtime::arg_int_or", runtime_arg_int_or),
     ("torch::runtime::input", runtime_input),
     ("torch::runtime::set_output", runtime_set_output),
     ("torch::runtime::set_text_output", runtime_set_text_output),
     ("torch::runtime::start_timer", runtime_start_timer),
     ("torch::runtime::set_token_count", runtime_set_token_count),
+    ("torch::runtime::compact2", runtime_compact2),
     ("torch::cache::clear", cache_clear),
     ("torch::cache::has", cache_has),
     ("torch::cache::get", cache_get),
@@ -355,6 +380,8 @@ const HOST_OPS: &[(&str, HostOp)] = &[
     ("torch::tensor::avg_pool2d_2", tensor_avg_pool2d_2),
     ("torch::nn::embedding", nn_embedding),
     ("torch::nn::linear", nn_linear),
+    ("torch::nn::rms_norm", nn_rms_norm),
+    ("torch::nn::apply_rope", nn_apply_rope),
     (
         "torch::nn::scaled_dot_product_attention",
         nn_scaled_dot_product_attention,
@@ -448,9 +475,23 @@ fn runtime_arg_int(context: &mut TorchContext, args: &[Value]) -> VmResult<CallO
     return_int(value)
 }
 
+fn runtime_arg_int_or(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let index = usize::try_from(int_arg(args, 0, "index")?)
+        .map_err(|_| host_error("argument index must be non-negative"))?;
+    let default = int_arg(args, 1, "default")?;
+    let Some(value) = context.args.get(index) else {
+        return return_int(default);
+    };
+    let value = value
+        .parse::<i64>()
+        .map_err(|err| host_error(format!("runtime argument {index} is not an int: {err}")))?;
+    return_int(value)
+}
+
 fn weights_load(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
     let path = PathBuf::from(string_arg(args, 0, "path")?);
     if context.weights_path.as_deref() != Some(path.as_path()) {
+        context.weight_handles.clear();
         let weights = Tensor::read_safetensors(&path)
             .map_err(|err| host_error(format!("failed to read {}: {err}", path.display())))?
             .into_iter()
@@ -466,20 +507,52 @@ fn weights_load(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutc
 
 fn weights_get(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
     let name = string_arg(args, 0, "name")?;
-    let tensor = get_or_build_weight(context, name)?;
-    return_tensor(context, tensor)
+    if let Some(handle) = cached_weight_handle(context, name) {
+        return return_int(handle);
+    } else {
+        let tensor = get_or_build_weight(context, name)?;
+        return_weight_tensor(context, name, tensor)
+    }
+}
+
+fn cached_weight_handle(context: &TorchContext, name: &str) -> Option<i64> {
+    context
+        .weight_handles
+        .get(name)
+        .copied()
+        .filter(|handle| context.tensors.contains_key(handle))
+}
+
+fn return_weight_tensor(
+    context: &mut TorchContext,
+    name: &str,
+    tensor: Tensor,
+) -> VmResult<CallOutcome> {
+    let handle = context.insert_tensor(tensor);
+    context.weight_handles.insert(name.to_owned(), handle);
+    return_int(handle)
 }
 
 fn weights_get_or(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
     let name = string_arg(args, 0, "name")?;
     let fallback = string_arg(args, 1, "fallback")?;
-    let tensor = context
-        .weights
-        .get(name)
-        .or_else(|| context.weights.get(fallback))
-        .ok_or_else(|| host_error(format!("missing weight '{name}' and fallback '{fallback}'")))?
-        .shallow_clone();
-    return_tensor(context, tensor)
+    if let Some(handle) = cached_weight_handle(context, name) {
+        return return_int(handle);
+    }
+    let cache_name = if context.weights.contains_key(name) {
+        name
+    } else {
+        fallback
+    };
+    if let Some(handle) = cached_weight_handle(context, cache_name) {
+        if cache_name != name {
+            context.weight_handles.insert(name.to_owned(), handle);
+        }
+        return return_int(handle);
+    }
+    let tensor = get_or_build_weight(context, name)
+        .or_else(|_| context.weight(fallback).map(Tensor::shallow_clone))?;
+    return_weight_tensor(context, name, tensor)
 }
 
 fn get_or_build_weight(context: &mut TorchContext, name: &str) -> VmResult<Tensor> {
@@ -543,6 +616,26 @@ fn runtime_set_token_count(context: &mut TorchContext, args: &[Value]) -> VmResu
     }
     context.generated_tokens = Some(generated_tokens);
     return_value(Value::Bool(true))
+}
+
+fn runtime_compact2(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let first = int_arg(args, 0, "first")?;
+    let second = int_arg(args, 1, "second")?;
+    let mut keep = HashSet::new();
+    keep.insert(first);
+    keep.insert(second);
+    keep.extend(context.inputs.iter().copied());
+    keep.extend(context.weight_handles.values().copied());
+    if let Some(output) = context.output {
+        keep.insert(output);
+    }
+    context.tensors.retain(|handle, _| keep.contains(handle));
+    context
+        .weight_handles
+        .retain(|_, handle| context.tensors.contains_key(handle));
+    let count = i64::try_from(context.tensors.len())
+        .map_err(|_| host_error("tensor count exceeds RustScript integer range"))?;
+    return_int(count)
 }
 
 fn cache_clear(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
@@ -753,52 +846,90 @@ fn tensor_causal_mask(context: &mut TorchContext, args: &[Value]) -> VmResult<Ca
 }
 
 fn tensor_rope_cos(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
-    rope_table(context, args, 0, f32::cos)
+    rope_table(context, args, 0, RopeKind::Cos)
 }
 
 fn tensor_rope_sin(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
-    rope_table(context, args, 0, f32::sin)
+    rope_table(context, args, 0, RopeKind::Sin)
 }
 
 fn tensor_rope_cos_at(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
     let start = int_arg(args, 3, "start")?;
-    rope_table(context, args, start, f32::cos)
+    rope_table(context, args, start, RopeKind::Cos)
 }
 
 fn tensor_rope_sin_at(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
     let start = int_arg(args, 3, "start")?;
-    rope_table(context, args, start, f32::sin)
+    rope_table(context, args, start, RopeKind::Sin)
 }
 
 fn rope_table(
     context: &mut TorchContext,
     args: &[Value],
     start: i64,
-    op: impl Fn(f32) -> f32,
+    kind: RopeKind,
 ) -> VmResult<CallOutcome> {
     let seq_len = usize::try_from(int_arg(args, 0, "seq_len")?)
         .map_err(|_| host_error("seq_len must be non-negative"))?;
     let head_dim = usize::try_from(int_arg(args, 1, "head_dim")?)
         .map_err(|_| host_error("head_dim must be non-negative"))?;
     let theta = float_arg(args, 2, "theta")? as f32;
+    if start < 0 {
+        return Err(host_error("start must be non-negative"));
+    }
+    let end = start
+        .checked_add(seq_len as i64)
+        .ok_or_else(|| host_error("rope range overflow"))?;
+    let key = RopeCacheKey {
+        kind,
+        head_dim,
+        theta_bits: theta.to_bits(),
+    };
+    let current_len = context
+        .rope_cache
+        .get(&key)
+        .map(|tensor| tensor.size()[2])
+        .unwrap_or(0);
+    if current_len < end {
+        let target_len = end.max(current_len.saturating_mul(2)).max(128);
+        let table = build_rope_table(target_len, head_dim, theta, context.device, kind);
+        context.rope_cache.insert(key, table);
+    }
+    let output = context
+        .rope_cache
+        .get(&key)
+        .expect("rope cache should contain key after build")
+        .narrow(2, start, seq_len as i64);
+    return_tensor(context, output)
+}
+
+fn build_rope_table(
+    len: i64,
+    head_dim: usize,
+    theta: f32,
+    device: Device,
+    kind: RopeKind,
+) -> Tensor {
     let half = head_dim / 2;
-    let mut data = Vec::with_capacity(seq_len * head_dim);
-    for pos in 0..seq_len {
+    let mut data = Vec::with_capacity(len as usize * head_dim);
+    for pos in 0..len as usize {
         let mut row = vec![0.0f32; head_dim];
         for idx in 0..half {
             let exponent = (idx * 2) as f32 / head_dim as f32;
-            let angle = (start + pos as i64) as f32 / theta.powf(exponent);
-            let value = op(angle);
+            let angle = pos as f32 / theta.powf(exponent);
+            let value = match kind {
+                RopeKind::Cos => angle.cos(),
+                RopeKind::Sin => angle.sin(),
+            };
             row[idx] = value;
             row[idx + half] = value;
         }
         data.extend(row);
     }
-    let output = Tensor::from_slice(&data)
-        .view([1, 1, seq_len as i64, head_dim as i64])
-        .to_device(context.device)
-        .to_kind(Kind::BFloat16);
-    return_tensor(context, output)
+    Tensor::from_slice(&data)
+        .view([1, 1, len, head_dim as i64])
+        .to_device(device)
+        .to_kind(Kind::BFloat16)
 }
 
 fn tensor_add(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
@@ -1145,6 +1276,33 @@ fn nn_linear(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome
         Some(bias) => input.linear(&weight, Some(&bias)),
         None => input.linear(&weight, None::<&Tensor>),
     };
+    return_tensor(context, output)
+}
+
+fn nn_rms_norm(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?.shallow_clone();
+    let weight = context.tensor(int_arg(args, 1, "weight")?)?.shallow_clone();
+    let eps = float_arg(args, 2, "eps")?;
+    let fp32 = input.to_kind(Kind::Float);
+    let variance = fp32
+        .pow_tensor_scalar(2.0)
+        .mean_dim(&[-1][..], true, Kind::Float);
+    let output = (fp32 * (variance + eps).rsqrt()).to_kind(Kind::BFloat16) * weight;
+    return_tensor(context, output)
+}
+
+fn nn_apply_rope(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?.shallow_clone();
+    let cos = context.tensor(int_arg(args, 1, "cos")?)?.shallow_clone();
+    let sin = context.tensor(int_arg(args, 2, "sin")?)?.shallow_clone();
+    let Some(&head_dim) = input.size().last() else {
+        return Err(host_error("input must have at least one dimension"));
+    };
+    let half = head_dim / 2;
+    let first = input.narrow(-1, 0, half);
+    let second = input.narrow(-1, half, half);
+    let rotated = Tensor::cat(&[&second.neg(), &first], -1);
+    let output = input * cos + rotated * sin;
     return_tensor(context, output)
 }
 

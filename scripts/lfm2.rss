@@ -5,6 +5,7 @@ let tokenizer_path: string = torch::runtime::arg(1);
 let system_prompt: string = torch::runtime::arg(2);
 let source_text: string = torch::runtime::arg(3);
 let max_new_tokens: int = torch::runtime::arg_int(4);
+let ignore_eos: int = torch::runtime::arg_int_or(5, 0);
 
 torch::weights::load(weights_path);
 torch::tokenizer::load(tokenizer_path);
@@ -20,14 +21,7 @@ fn linear(input: int, name: string) -> int {
 
 fn rms_norm(input: int, weight_name: string) -> int {
     let scale_weight = weight(weight_name);
-    let fp32: int = torch::tensor::to_float(input);
-    let squared: int = torch::tensor::pow_scalar(fp32, 2.0);
-    let variance: int = torch::tensor::mean_dim(squared, -1, true);
-    let shifted: int = torch::tensor::add_scalar(variance, 0.00001);
-    let inv: int = torch::tensor::rsqrt(shifted);
-    let scaled: int = torch::tensor::mul(fp32, inv);
-    let normalized: int = torch::tensor::to_bfloat16(scaled);
-    torch::tensor::mul(normalized, scale_weight)
+    torch::nn::rms_norm(input, scale_weight, 0.00001)
 }
 
 fn rotate_half(input: int) -> int {
@@ -40,11 +34,7 @@ fn rotate_half(input: int) -> int {
 }
 
 fn apply_rope(input: int, cos: int, sin: int) -> int {
-    let rotated: int = rotate_half(input);
-    torch::tensor::add(
-        torch::tensor::mul(input, cos),
-        torch::tensor::mul(rotated, sin)
-    )
+    torch::nn::apply_rope(input, cos, sin)
 }
 
 fn repeat_kv(input: int) -> int {
@@ -124,29 +114,34 @@ fn conv_mixer(input: int, prefix: string, incremental: bool) -> int {
     let x_part: int = torch::tensor::narrow(projected, 1, 2048, 1024);
     let bx: int = torch::tensor::mul(b_part, x_part);
     let state_name = prefix + ".conv.state";
-    let mut conv_input: int = bx;
-    if incremental {
+    let conv_weight = weight(prefix + ".conv.conv.weight");
+    let conv_trimmed: int = if incremental => {
         let old_state: int = torch::cache::get(state_name);
-        let conv_cat: int = torch::tensor::cat2(old_state, bx, 2);
-        conv_input = conv_cat;
-    }
-    let conv_full: int = torch::nn::conv1d(
-        conv_input,
-        weight(prefix + ".conv.conv.weight"),
-        0,
-        1,
-        2,
-        1,
-        1024
-    );
-    let state: int = torch::tensor::tail(conv_input, 2, 2);
-    torch::cache::set(state_name, state);
-    let mut conv_trimmed: int = torch::tensor::narrow(conv_full, -1, 0, seq_len);
-    if incremental {
-        let conv_start: int = torch::tensor::size(conv_input, 2) - seq_len;
-        let conv_tail: int = torch::tensor::narrow(conv_full, -1, conv_start, 1);
-        conv_trimmed = conv_tail;
-    }
+        let old0: int = torch::tensor::narrow(old_state, 2, 0, 1);
+        let old1: int = torch::tensor::narrow(old_state, 2, 1, 1);
+        let w0: int = torch::tensor::view3(torch::tensor::select(conv_weight, 2, 0), 1, 1024, 1);
+        let w1: int = torch::tensor::view3(torch::tensor::select(conv_weight, 2, 1), 1, 1024, 1);
+        let w2: int = torch::tensor::view3(torch::tensor::select(conv_weight, 2, 2), 1, 1024, 1);
+        let part0: int = torch::tensor::mul(old0, w0);
+        let part1: int = torch::tensor::mul(old1, w1);
+        let part2: int = torch::tensor::mul(bx, w2);
+        let state: int = torch::tensor::cat2(old1, bx, 2);
+        torch::cache::set(state_name, state);
+        torch::tensor::add(torch::tensor::add(part0, part1), part2)
+    } else => {
+        let conv_full: int = torch::nn::conv1d(
+            bx,
+            conv_weight,
+            0,
+            1,
+            2,
+            1,
+            1024
+        );
+        let state: int = torch::tensor::tail(bx, 2, 2);
+        torch::cache::set(state_name, state);
+        torch::tensor::narrow(conv_full, -1, 0, seq_len)
+    };
     let mixed: int = torch::tensor::transpose(
         torch::tensor::mul(c_part, conv_trimmed),
         -1,
@@ -242,19 +237,21 @@ let mut generated_tokens = 0;
 torch::cache::clear();
 torch::runtime::start_timer();
 let mut logits = model(prompt_tokens, 0, false);
+torch::runtime::compact2(logits, tokens);
 while step < max_new_tokens {
     let next_token: int = torch::tensor::argmax_int(logits, -1);
     let appended: int = torch::tokenizer::append_token(tokens, next_token);
     tokens = appended;
     generated_tokens = generated_tokens + 1;
     step = step + 1;
-    if torch::tokenizer::is_eos(next_token) {
+    if ignore_eos == 0 && torch::tokenizer::is_eos(next_token) {
         break;
     }
     if step < max_new_tokens {
         let decode_input: int = torch::tokenizer::single_token(next_token);
         let decode_position: int = prompt_len + generated_tokens - 1;
         logits = model(decode_input, decode_position, true);
+        torch::runtime::compact2(logits, tokens);
     }
 }
 
