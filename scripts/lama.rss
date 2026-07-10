@@ -1,0 +1,248 @@
+use torch;
+
+let weights_path: string = torch::runtime::arg(0);
+let weight_count: int = torch::weights::load(weights_path);
+
+fn conv2d(
+    input: int,
+    prefix: string,
+    stride: int,
+    padding: int,
+    reflect: bool,
+    bias: bool
+) -> int {
+    let output: int = torch::nn::conv2d(input, prefix, stride, padding, reflect, bias);
+    output
+}
+
+fn batch_norm_relu(input: int, prefix: string) -> int {
+    let normalized: int = torch::nn::batch_norm2d(input, prefix);
+    let output: int = torch::tensor::relu(normalized);
+    output
+}
+
+fn pair(local: int, global: int) -> int {
+    let output: int = torch::pair::new(local, global);
+    output
+}
+
+fn pair_local(input: int) -> int {
+    let output: int = torch::pair::local(input);
+    output
+}
+
+fn pair_global(input: int) -> int {
+    let output: int = torch::pair::global(input);
+    output
+}
+
+fn ffc_local(input: int, prefix: string, stride: int, padding: int) -> int {
+    let local: int = pair_local(input);
+    let output: int = conv2d(
+        local,
+        prefix + ".ffc.convl2l",
+        stride,
+        padding,
+        true,
+        false
+    );
+    let activated: int = batch_norm_relu(output, prefix + ".bn_l");
+    pair(activated, 0)
+}
+
+fn ffc_split(input: int, prefix: string, stride: int, padding: int) -> int {
+    let local: int = pair_local(input);
+    let local_output: int = conv2d(
+        local,
+        prefix + ".ffc.convl2l",
+        stride,
+        padding,
+        true,
+        false
+    );
+    let global_output: int = conv2d(
+        local,
+        prefix + ".ffc.convl2g",
+        stride,
+        padding,
+        true,
+        false
+    );
+    let local_activated: int = batch_norm_relu(local_output, prefix + ".bn_l");
+    let global_activated: int = batch_norm_relu(global_output, prefix + ".bn_g");
+    pair(local_activated, global_activated)
+}
+
+fn fourier_unit(input: int, prefix: string) -> int {
+    let batch: int = torch::tensor::size(input, 0);
+    let height: int = torch::tensor::size(input, 2);
+    let width: int = torch::tensor::size(input, 3);
+
+    let fft: int = torch::tensor::fft_rfftn2(input);
+    let real: int = torch::tensor::real(fft);
+    let imag: int = torch::tensor::imag(fft);
+    let stacked: int = torch::tensor::stack2(real, imag, -1);
+    let permuted: int = torch::tensor::permute5(stacked, 0, 1, 4, 2, 3);
+    let contiguous: int = torch::tensor::contiguous(permuted);
+    let fft_height: int = torch::tensor::size(contiguous, 3);
+    let fft_width: int = torch::tensor::size(contiguous, 4);
+    let flattened: int = torch::tensor::view4(
+        contiguous,
+        batch,
+        -1,
+        fft_height,
+        fft_width
+    );
+
+    let convolved: int = conv2d(
+        flattened,
+        prefix + ".conv_layer",
+        1,
+        0,
+        false,
+        false
+    );
+    let activated: int = batch_norm_relu(convolved, prefix + ".bn");
+    let output_height: int = torch::tensor::size(activated, 2);
+    let output_width: int = torch::tensor::size(activated, 3);
+    let complex_channels: int = torch::tensor::view5(
+        activated,
+        batch,
+        -1,
+        2,
+        output_height,
+        output_width
+    );
+    let complex_layout: int = torch::tensor::permute5(complex_channels, 0, 1, 3, 4, 2);
+    let complex_contiguous: int = torch::tensor::contiguous(complex_layout);
+    let output_real: int = torch::tensor::select(complex_contiguous, -1, 0);
+    let output_imag: int = torch::tensor::select(complex_contiguous, -1, 1);
+    let spectrum: int = torch::tensor::complex(output_real, output_imag);
+    let output: int = torch::tensor::fft_irfftn2(spectrum, height, width);
+    output
+}
+
+fn spectral_transform(input: int, prefix: string) -> int {
+    let projected: int = conv2d(
+        input,
+        prefix + ".conv1.0",
+        1,
+        0,
+        false,
+        false
+    );
+    let x: int = batch_norm_relu(projected, prefix + ".conv1.1");
+    let frequency: int = fourier_unit(x, prefix + ".fu");
+    let residual: int = torch::tensor::add(x, frequency);
+    let output: int = conv2d(
+        residual,
+        prefix + ".conv2",
+        1,
+        0,
+        false,
+        false
+    );
+    output
+}
+
+fn ffc_mixed(input: int, prefix: string) -> int {
+    let local: int = pair_local(input);
+    let global: int = pair_global(input);
+    let local_from_local: int = conv2d(
+        local,
+        prefix + ".ffc.convl2l",
+        1,
+        1,
+        true,
+        false
+    );
+    let local_from_global: int = conv2d(
+        global,
+        prefix + ".ffc.convg2l",
+        1,
+        1,
+        true,
+        false
+    );
+    let global_from_local: int = conv2d(
+        local,
+        prefix + ".ffc.convl2g",
+        1,
+        1,
+        true,
+        false
+    );
+    let global_from_global: int = spectral_transform(
+        global,
+        prefix + ".ffc.convg2g"
+    );
+    let local_output: int = torch::tensor::add(local_from_local, local_from_global);
+    let global_output: int = torch::tensor::add(global_from_local, global_from_global);
+    let local_activated: int = batch_norm_relu(local_output, prefix + ".bn_l");
+    let global_activated: int = batch_norm_relu(global_output, prefix + ".bn_g");
+    pair(local_activated, global_activated)
+}
+
+fn residual_block(input: int, prefix: string) -> int {
+    let identity_local: int = pair_local(input);
+    let identity_global: int = pair_global(input);
+    let first: int = ffc_mixed(input, prefix + ".conv1");
+    let second: int = ffc_mixed(first, prefix + ".conv2");
+    let output_local: int = torch::tensor::add(pair_local(second), identity_local);
+    let output_global: int = torch::tensor::add(pair_global(second), identity_global);
+    pair(output_local, output_global)
+}
+
+fn generator(input: int) -> int {
+    let padded: int = torch::tensor::pad_reflect2d(input, 3, 3, 3, 3);
+    let mut branches: int = pair(padded, 0);
+    branches = ffc_local(branches, "model.1", 1, 0);
+    branches = ffc_local(branches, "model.2", 2, 1);
+    branches = ffc_local(branches, "model.3", 2, 1);
+    branches = ffc_split(branches, "model.4", 2, 1);
+
+    branches = residual_block(branches, "model.5");
+    branches = residual_block(branches, "model.6");
+    branches = residual_block(branches, "model.7");
+    branches = residual_block(branches, "model.8");
+    branches = residual_block(branches, "model.9");
+    branches = residual_block(branches, "model.10");
+    branches = residual_block(branches, "model.11");
+    branches = residual_block(branches, "model.12");
+    branches = residual_block(branches, "model.13");
+    branches = residual_block(branches, "model.14");
+    branches = residual_block(branches, "model.15");
+    branches = residual_block(branches, "model.16");
+    branches = residual_block(branches, "model.17");
+    branches = residual_block(branches, "model.18");
+    branches = residual_block(branches, "model.19");
+    branches = residual_block(branches, "model.20");
+    branches = residual_block(branches, "model.21");
+    branches = residual_block(branches, "model.22");
+
+    let merged: int = torch::tensor::cat2(pair_local(branches), pair_global(branches), 1);
+    let upsample1: int = torch::nn::conv_transpose2d(merged, "model.24");
+    let upsample1: int = batch_norm_relu(upsample1, "model.25");
+    let upsample2: int = torch::nn::conv_transpose2d(upsample1, "model.27");
+    let upsample2: int = batch_norm_relu(upsample2, "model.28");
+    let upsample3: int = torch::nn::conv_transpose2d(upsample2, "model.30");
+    let upsample3: int = batch_norm_relu(upsample3, "model.31");
+    let final_padded: int = torch::tensor::pad_reflect2d(upsample3, 3, 3, 3, 3);
+    let final_conv: int = conv2d(final_padded, "model.34", 1, 0, false, true);
+    let output: int = torch::tensor::sigmoid(final_conv);
+    output
+}
+
+let image: int = torch::runtime::input(0);
+let mask: int = torch::runtime::input(1);
+let one: int = torch::tensor::ones_like(mask);
+let inverse_mask: int = torch::tensor::sub(one, mask);
+let masked_image: int = torch::tensor::mul(image, inverse_mask);
+let model_input: int = torch::tensor::cat2(masked_image, mask, 1);
+let predicted: int = generator(model_input);
+let generated: int = torch::tensor::mul(predicted, mask);
+let retained: int = torch::tensor::mul(inverse_mask, image);
+let output: int = torch::tensor::add(generated, retained);
+let published: bool = torch::runtime::set_output(output);
+weight_count;
+published;
