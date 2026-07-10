@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result, anyhow, bail};
-use koharu_torch::{Device, Tensor};
+use koharu_torch::{Device, Kind, Tensor};
+use tokenizers::Tokenizer;
 use vm::{
     CallOutcome, CallReturn, HostArgsFunction, Program, Value, Vm, VmError, VmResult, VmStatus,
 };
@@ -35,11 +36,14 @@ struct TorchContext {
     device: Device,
     weights: HashMap<String, Tensor>,
     weights_path: Option<PathBuf>,
+    tokenizer: Option<Tokenizer>,
+    tokenizer_path: Option<PathBuf>,
     tensors: HashMap<i64, Tensor>,
     pairs: HashMap<i64, FfcPair>,
     inputs: Vec<i64>,
     args: Vec<String>,
     output: Option<i64>,
+    text_output: Option<String>,
     next_tensor: i64,
     next_pair: i64,
 }
@@ -79,16 +83,21 @@ impl TorchContext {
     }
 
     fn begin(&mut self, image: Tensor, mask: Tensor, args: Vec<String>) {
+        self.begin_args(args);
+        let image = self.insert_tensor(image);
+        let mask = self.insert_tensor(mask);
+        self.inputs.extend([image, mask]);
+    }
+
+    fn begin_args(&mut self, args: Vec<String>) {
         self.tensors.clear();
         self.pairs.clear();
         self.inputs.clear();
         self.output = None;
+        self.text_output = None;
         self.args = args;
         self.next_tensor = 1;
         self.next_pair = 1;
-        let image = self.insert_tensor(image);
-        let mask = self.insert_tensor(mask);
-        self.inputs.extend([image, mask]);
     }
 
     fn finish(&mut self) -> Result<Tensor> {
@@ -105,7 +114,18 @@ impl TorchContext {
         self.inputs.clear();
         self.args.clear();
         self.output = None;
+        self.text_output = None;
         Ok(output)
+    }
+
+    fn finish_text(&mut self) -> String {
+        let output = self.text_output.take().unwrap_or_default();
+        self.tensors.clear();
+        self.pairs.clear();
+        self.inputs.clear();
+        self.args.clear();
+        self.output = None;
+        output
     }
 }
 
@@ -121,11 +141,14 @@ impl TorchHostRuntime {
                 device,
                 weights: HashMap::new(),
                 weights_path: None,
+                tokenizer: None,
+                tokenizer_path: None,
                 tensors: HashMap::new(),
                 pairs: HashMap::new(),
                 inputs: Vec::new(),
                 args: Vec::new(),
                 output: None,
+                text_output: None,
                 next_tensor: 1,
                 next_pair: 1,
             })),
@@ -154,6 +177,21 @@ impl TorchHostRuntime {
         self.lock()?.finish()
     }
 
+    pub(crate) fn run_text(&self, program: Arc<Program>, args: Vec<String>) -> Result<String> {
+        let _execution = self
+            .execution
+            .lock()
+            .map_err(|_| anyhow!("Torch execution lock is poisoned"))?;
+        self.lock()?.begin_args(args);
+        let mut vm = Vm::new_shared(program);
+        self.bind(&mut vm);
+        let status = vm.run().map_err(|err| anyhow!(err.to_string()))?;
+        if status != VmStatus::Halted {
+            bail!("RustScript did not halt: {status:?}");
+        }
+        Ok(self.lock()?.finish_text())
+    }
+
     fn lock(&self) -> Result<MutexGuard<'_, TorchContext>> {
         self.context
             .lock()
@@ -173,26 +211,87 @@ impl TorchHostRuntime {
     }
 }
 
+pub struct TorchScriptRunner {
+    runtime: TorchHostRuntime,
+}
+
+impl TorchScriptRunner {
+    pub async fn new(device: Device) -> Result<Self> {
+        crate::preload_libtorch()
+            .await
+            .context("failed to initialize LibTorch runtime")?;
+        Ok(Self {
+            runtime: TorchHostRuntime::new(device),
+        })
+    }
+
+    pub fn run_text(&self, program: Arc<Program>, args: Vec<String>) -> Result<String> {
+        self.runtime.run_text(program, args)
+    }
+}
+
 const HOST_OPS: &[(&str, HostOp)] = &[
     ("torch::runtime::arg", runtime_arg),
+    ("torch::runtime::arg_int", runtime_arg_int),
     ("torch::runtime::input", runtime_input),
     ("torch::runtime::set_output", runtime_set_output),
+    ("torch::runtime::set_text_output", runtime_set_text_output),
+    ("torch::tokenizer::load", tokenizer_load),
+    ("torch::tokenizer::encode_chat", tokenizer_encode_chat),
+    (
+        "torch::tokenizer::decode_generated",
+        tokenizer_decode_generated,
+    ),
+    ("torch::tokenizer::append_token", tokenizer_append_token),
+    ("torch::tokenizer::is_eos", tokenizer_is_eos),
     ("torch::weights::load", weights_load),
+    ("torch::weights::get", weights_get),
+    ("torch::weights::get_or", weights_get_or),
     ("torch::pair::new", pair_new),
     ("torch::pair::local", pair_local),
     ("torch::pair::global", pair_global),
     ("torch::tensor::size", tensor_size),
+    ("torch::tensor::shape", tensor_shape),
+    ("torch::tensor::to_float", tensor_to_float),
+    ("torch::tensor::to_bfloat16", tensor_to_bfloat16),
     ("torch::tensor::ones_like", tensor_ones_like),
+    ("torch::tensor::arange", tensor_arange),
+    ("torch::tensor::causal_mask", tensor_causal_mask),
+    ("torch::tensor::rope_cos", tensor_rope_cos),
+    ("torch::tensor::rope_sin", tensor_rope_sin),
     ("torch::tensor::add", tensor_add),
     ("torch::tensor::sub", tensor_sub),
     ("torch::tensor::mul", tensor_mul),
+    ("torch::tensor::add_scalar", tensor_add_scalar),
+    ("torch::tensor::mul_scalar", tensor_mul_scalar),
+    ("torch::tensor::div_scalar", tensor_div_scalar),
+    ("torch::tensor::pow_scalar", tensor_pow_scalar),
+    ("torch::tensor::mean_dim", tensor_mean_dim),
+    ("torch::tensor::rsqrt", tensor_rsqrt),
+    ("torch::tensor::neg", tensor_neg),
+    ("torch::tensor::cos", tensor_cos),
+    ("torch::tensor::sin", tensor_sin),
+    ("torch::tensor::matmul", tensor_matmul),
+    ("torch::tensor::softmax", tensor_softmax),
+    ("torch::tensor::masked_fill", tensor_masked_fill),
     ("torch::tensor::cat2", tensor_cat2),
     ("torch::tensor::stack2", tensor_stack2),
+    ("torch::tensor::chunk", tensor_chunk),
+    ("torch::tensor::narrow", tensor_narrow),
+    ("torch::tensor::transpose", tensor_transpose),
+    ("torch::tensor::unsqueeze", tensor_unsqueeze),
+    ("torch::tensor::repeat_interleave", tensor_repeat_interleave),
+    ("torch::tensor::argmax_int", tensor_argmax_int),
     ("torch::tensor::pad_reflect2d", tensor_pad_reflect2d),
     ("torch::tensor::relu", tensor_relu),
     ("torch::tensor::sigmoid", tensor_sigmoid),
+    ("torch::tensor::silu", tensor_silu),
     ("torch::tensor::contiguous", tensor_contiguous),
+    ("torch::tensor::permute3", tensor_permute3),
+    ("torch::tensor::permute4", tensor_permute4),
     ("torch::tensor::permute5", tensor_permute5),
+    ("torch::tensor::view2", tensor_view2),
+    ("torch::tensor::view3", tensor_view3),
     ("torch::tensor::view4", tensor_view4),
     ("torch::tensor::view5", tensor_view5),
     ("torch::tensor::select", tensor_select),
@@ -202,6 +301,9 @@ const HOST_OPS: &[(&str, HostOp)] = &[
     ("torch::tensor::fft_rfftn2", tensor_fft_rfftn2),
     ("torch::tensor::fft_irfftn2", tensor_fft_irfftn2),
     ("torch::tensor::avg_pool2d_2", tensor_avg_pool2d_2),
+    ("torch::nn::embedding", nn_embedding),
+    ("torch::nn::linear", nn_linear),
+    ("torch::nn::conv1d", nn_conv1d),
     ("torch::nn::conv2d", nn_conv2d),
     ("torch::nn::conv_transpose2d", nn_conv_transpose2d),
     ("torch::nn::batch_norm2d", nn_batch_norm2d),
@@ -227,6 +329,14 @@ fn bool_arg(args: &[Value], index: usize, label: &str) -> VmResult<bool> {
     match arg(args, index, label)? {
         Value::Bool(value) => Ok(*value),
         _ => Err(VmError::TypeMismatch("bool")),
+    }
+}
+
+fn float_arg(args: &[Value], index: usize, label: &str) -> VmResult<f64> {
+    match arg(args, index, label)? {
+        Value::Float(value) => Ok(*value),
+        Value::Int(value) => Ok(*value as f64),
+        _ => Err(VmError::TypeMismatch("float")),
     }
 }
 
@@ -270,6 +380,18 @@ fn runtime_arg(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutco
     return_value(Value::String(value.into()))
 }
 
+fn runtime_arg_int(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let index = usize::try_from(int_arg(args, 0, "index")?)
+        .map_err(|_| host_error("argument index must be non-negative"))?;
+    let value = context
+        .args
+        .get(index)
+        .ok_or_else(|| host_error(format!("unknown runtime argument {index}")))?
+        .parse::<i64>()
+        .map_err(|err| host_error(format!("runtime argument {index} is not an int: {err}")))?;
+    return_int(value)
+}
+
 fn weights_load(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
     let path = PathBuf::from(string_arg(args, 0, "path")?);
     if context.weights_path.as_deref() != Some(path.as_path()) {
@@ -286,11 +408,117 @@ fn weights_load(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutc
     return_int(count)
 }
 
+fn weights_get(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let name = string_arg(args, 0, "name")?;
+    let tensor = context.weight(name)?.shallow_clone();
+    return_tensor(context, tensor)
+}
+
+fn weights_get_or(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let name = string_arg(args, 0, "name")?;
+    let fallback = string_arg(args, 1, "fallback")?;
+    let tensor = context
+        .weights
+        .get(name)
+        .or_else(|| context.weights.get(fallback))
+        .ok_or_else(|| host_error(format!("missing weight '{name}' and fallback '{fallback}'")))?
+        .shallow_clone();
+    return_tensor(context, tensor)
+}
+
 fn runtime_set_output(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
     let handle = int_arg(args, 0, "tensor")?;
     context.tensor(handle)?;
     context.output = Some(handle);
     return_value(Value::Bool(true))
+}
+
+fn runtime_set_text_output(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let text = string_arg(args, 0, "text")?.to_owned();
+    context.text_output = Some(text);
+    return_value(Value::Bool(true))
+}
+
+fn tokenizer_load(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let path = PathBuf::from(string_arg(args, 0, "path")?);
+    if context.tokenizer_path.as_deref() != Some(path.as_path()) {
+        let tokenizer = Tokenizer::from_file(&path)
+            .map_err(|err| host_error(format!("failed to read {}: {err}", path.display())))?;
+        context.tokenizer = Some(tokenizer);
+        context.tokenizer_path = Some(path);
+    }
+    return_value(Value::Bool(true))
+}
+
+fn tokenizer_encode_chat(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let system = string_arg(args, 0, "system")?;
+    let user = string_arg(args, 1, "user")?;
+    let prompt = format!(
+        "<|startoftext|><|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n"
+    );
+    let tokenizer = context
+        .tokenizer
+        .as_ref()
+        .ok_or_else(|| host_error("tokenizer has not been loaded"))?;
+    let encoding = tokenizer
+        .encode(prompt, false)
+        .map_err(|err| host_error(format!("tokenizer encode failed: {err}")))?;
+    let ids = encoding
+        .get_ids()
+        .iter()
+        .map(|value| i64::from(*value))
+        .collect::<Vec<_>>();
+    let len = i64::try_from(ids.len()).map_err(|_| host_error("token count out of range"))?;
+    let tensor = Tensor::from_slice(&ids)
+        .view([1, len])
+        .to_device(context.device);
+    return_tensor(context, tensor)
+}
+
+fn tokenizer_decode_generated(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let tokens = context
+        .tensor(int_arg(args, 0, "tokens")?)?
+        .to_device(Device::Cpu)
+        .to_kind(Kind::Int64)
+        .view([-1]);
+    let prompt_len = usize::try_from(int_arg(args, 1, "prompt_len")?)
+        .map_err(|_| host_error("prompt length must be non-negative"))?;
+    let ids = Vec::<i64>::try_from(&tokens)
+        .map_err(|err| host_error(format!("failed to copy token ids: {err}")))?;
+    let generated = ids
+        .into_iter()
+        .skip(prompt_len)
+        .filter_map(|value| u32::try_from(value).ok())
+        .collect::<Vec<_>>();
+    let tokenizer = context
+        .tokenizer
+        .as_ref()
+        .ok_or_else(|| host_error("tokenizer has not been loaded"))?;
+    let text = tokenizer
+        .decode(&generated, true)
+        .map_err(|err| host_error(format!("tokenizer decode failed: {err}")))?;
+    return_value(Value::String(text.into()))
+}
+
+fn tokenizer_append_token(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let tokens = context
+        .tensor(int_arg(args, 0, "tokens")?)?
+        .to_device(Device::Cpu)
+        .to_kind(Kind::Int64)
+        .view([-1]);
+    let mut ids = Vec::<i64>::try_from(&tokens)
+        .map_err(|err| host_error(format!("failed to copy token ids: {err}")))?;
+    ids.push(int_arg(args, 1, "token")?);
+    let len = i64::try_from(ids.len()).map_err(|_| host_error("token count out of range"))?;
+    let output = Tensor::from_slice(&ids)
+        .view([1, len])
+        .to_device(context.device);
+    return_tensor(context, output)
+}
+
+fn tokenizer_is_eos(_context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let token = int_arg(args, 0, "token")?;
+    return_value(Value::Bool(token == 7))
 }
 
 fn pair_new(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
@@ -313,14 +541,29 @@ fn pair_global(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutco
 
 fn tensor_size(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
     let tensor = context.tensor(int_arg(args, 0, "tensor")?)?;
-    let dim = usize::try_from(int_arg(args, 1, "dim")?)
-        .map_err(|_| host_error("dimension must be non-negative"))?;
+    let raw_dim = int_arg(args, 1, "dim")?;
+    let rank = i64::try_from(tensor.size().len()).map_err(|_| host_error("rank out of range"))?;
+    let dim = if raw_dim < 0 { rank + raw_dim } else { raw_dim };
+    let dim = usize::try_from(dim).map_err(|_| host_error("dimension is out of range"))?;
     let value = tensor
         .size()
         .get(dim)
         .copied()
         .ok_or_else(|| host_error(format!("dimension {dim} is out of range")))?;
     return_int(value)
+}
+
+fn tensor_shape(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let tensor = context.tensor(int_arg(args, 0, "tensor")?)?;
+    return_value(Value::String(format!("{:?}", tensor.size()).into()))
+}
+
+fn tensor_to_float(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    unary_tensor(context, args, |input| input.to_kind(Kind::Float))
+}
+
+fn tensor_to_bfloat16(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    unary_tensor(context, args, |input| input.to_kind(Kind::BFloat16))
 }
 
 fn unary_tensor(
@@ -348,6 +591,61 @@ fn tensor_ones_like(context: &mut TorchContext, args: &[Value]) -> VmResult<Call
     unary_tensor(context, args, Tensor::ones_like)
 }
 
+fn tensor_arange(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let end = int_arg(args, 0, "end")?;
+    let output = Tensor::arange(end, (Kind::Int64, context.device));
+    return_tensor(context, output)
+}
+
+fn tensor_causal_mask(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let seq_len = int_arg(args, 0, "seq_len")?;
+    let allowed = Tensor::ones([seq_len, seq_len], (Kind::Float, context.device)).tril(0);
+    let blocked = allowed.lt(0.5);
+    let zeros = Tensor::zeros([seq_len, seq_len], (Kind::Float, context.device));
+    let output = zeros
+        .masked_fill(&blocked, f64::NEG_INFINITY)
+        .view([1, 1, seq_len, seq_len]);
+    return_tensor(context, output)
+}
+
+fn tensor_rope_cos(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    rope_table(context, args, f32::cos)
+}
+
+fn tensor_rope_sin(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    rope_table(context, args, f32::sin)
+}
+
+fn rope_table(
+    context: &mut TorchContext,
+    args: &[Value],
+    op: impl Fn(f32) -> f32,
+) -> VmResult<CallOutcome> {
+    let seq_len = usize::try_from(int_arg(args, 0, "seq_len")?)
+        .map_err(|_| host_error("seq_len must be non-negative"))?;
+    let head_dim = usize::try_from(int_arg(args, 1, "head_dim")?)
+        .map_err(|_| host_error("head_dim must be non-negative"))?;
+    let theta = float_arg(args, 2, "theta")? as f32;
+    let half = head_dim / 2;
+    let mut data = Vec::with_capacity(seq_len * head_dim);
+    for pos in 0..seq_len {
+        let mut row = vec![0.0f32; head_dim];
+        for idx in 0..half {
+            let exponent = (idx * 2) as f32 / head_dim as f32;
+            let angle = pos as f32 / theta.powf(exponent);
+            let value = op(angle);
+            row[idx] = value;
+            row[idx + half] = value;
+        }
+        data.extend(row);
+    }
+    let output = Tensor::from_slice(&data)
+        .view([1, 1, seq_len as i64, head_dim as i64])
+        .to_device(context.device)
+        .to_kind(Kind::BFloat16);
+    return_tensor(context, output)
+}
+
 fn tensor_add(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
     binary_tensor(context, args, |left, right| left + right)
 }
@@ -358,6 +656,72 @@ fn tensor_sub(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcom
 
 fn tensor_mul(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
     binary_tensor(context, args, |left, right| left * right)
+}
+
+fn tensor_add_scalar(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?;
+    let value = float_arg(args, 1, "value")?;
+    return_tensor(context, input + value)
+}
+
+fn tensor_mul_scalar(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?;
+    let value = float_arg(args, 1, "value")?;
+    return_tensor(context, input * value)
+}
+
+fn tensor_div_scalar(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?;
+    let value = float_arg(args, 1, "value")?;
+    return_tensor(context, input / value)
+}
+
+fn tensor_pow_scalar(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?;
+    let value = float_arg(args, 1, "value")?;
+    return_tensor(context, input.pow_tensor_scalar(value))
+}
+
+fn tensor_mean_dim(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?;
+    let dim = int_arg(args, 1, "dim")?;
+    let keepdim = bool_arg(args, 2, "keepdim")?;
+    let output = input.mean_dim(&[dim][..], keepdim, Kind::Float);
+    return_tensor(context, output)
+}
+
+fn tensor_rsqrt(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    unary_tensor(context, args, Tensor::rsqrt)
+}
+
+fn tensor_neg(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    unary_tensor(context, args, Tensor::neg)
+}
+
+fn tensor_cos(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    unary_tensor(context, args, Tensor::cos)
+}
+
+fn tensor_sin(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    unary_tensor(context, args, Tensor::sin)
+}
+
+fn tensor_matmul(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    binary_tensor(context, args, Tensor::matmul)
+}
+
+fn tensor_softmax(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?;
+    let dim = int_arg(args, 1, "dim")?;
+    let output = input.softmax(dim, Kind::Float);
+    return_tensor(context, output)
+}
+
+fn tensor_masked_fill(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?;
+    let mask = context.tensor(int_arg(args, 1, "mask")?)?;
+    let value = float_arg(args, 2, "value")?;
+    return_tensor(context, input.masked_fill(mask, value))
 }
 
 fn tensor_cat2(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
@@ -374,6 +738,69 @@ fn tensor_stack2(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOut
     let dim = int_arg(args, 2, "dim")?;
     let output = Tensor::stack(&[left, right], dim);
     return_tensor(context, output)
+}
+
+fn tensor_chunk(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?;
+    let chunks = int_arg(args, 1, "chunks")?;
+    if chunks <= 0 {
+        return Err(host_error("chunks must be positive"));
+    }
+    let raw_dim = int_arg(args, 2, "dim")?;
+    let rank = i64::try_from(input.size().len()).map_err(|_| host_error("rank out of range"))?;
+    let dim = if raw_dim < 0 { rank + raw_dim } else { raw_dim };
+    let dim_index = usize::try_from(dim).map_err(|_| host_error("dimension is out of range"))?;
+    let index = usize::try_from(int_arg(args, 3, "index")?)
+        .map_err(|_| host_error("chunk index must be non-negative"))?;
+    let dim_size = *input
+        .size()
+        .get(dim_index)
+        .ok_or_else(|| host_error(format!("dimension {dim} is out of range")))?;
+    let chunk_size = (dim_size + chunks - 1) / chunks;
+    let start =
+        i64::try_from(index).map_err(|_| host_error("chunk index out of range"))? * chunk_size;
+    if start >= dim_size {
+        return Err(host_error(format!("chunk index {index} is out of range")));
+    }
+    let len = chunk_size.min(dim_size - start);
+    let output = input.narrow(dim, start, len);
+    return_tensor(context, output)
+}
+
+fn tensor_narrow(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?;
+    let dim = int_arg(args, 1, "dim")?;
+    let start = int_arg(args, 2, "start")?;
+    let len = int_arg(args, 3, "len")?;
+    return_tensor(context, input.narrow(dim, start, len))
+}
+
+fn tensor_transpose(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?;
+    let dim0 = int_arg(args, 1, "dim0")?;
+    let dim1 = int_arg(args, 2, "dim1")?;
+    return_tensor(context, input.transpose(dim0, dim1))
+}
+
+fn tensor_unsqueeze(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?;
+    let dim = int_arg(args, 1, "dim")?;
+    return_tensor(context, input.unsqueeze(dim))
+}
+
+fn tensor_repeat_interleave(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?;
+    let repeats = int_arg(args, 1, "repeats")?;
+    let dim = int_arg(args, 2, "dim")?;
+    let output = input.repeat_interleave_self_int(repeats, dim, None);
+    return_tensor(context, output)
+}
+
+fn tensor_argmax_int(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?;
+    let dim = int_arg(args, 1, "dim")?;
+    let output = input.argmax(dim, false).to_device(Device::Cpu).view([-1]);
+    return_int(output.int64_value(&[0]))
 }
 
 fn tensor_pad_reflect2d(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
@@ -394,8 +821,35 @@ fn tensor_sigmoid(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOu
     unary_tensor(context, args, Tensor::sigmoid)
 }
 
+fn tensor_silu(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    unary_tensor(context, args, Tensor::silu)
+}
+
 fn tensor_contiguous(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
     unary_tensor(context, args, Tensor::contiguous)
+}
+
+fn tensor_permute3(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?;
+    let dims = [
+        int_arg(args, 1, "d0")?,
+        int_arg(args, 2, "d1")?,
+        int_arg(args, 3, "d2")?,
+    ];
+    let output = input.permute(dims);
+    return_tensor(context, output)
+}
+
+fn tensor_permute4(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?;
+    let dims = [
+        int_arg(args, 1, "d0")?,
+        int_arg(args, 2, "d1")?,
+        int_arg(args, 3, "d2")?,
+        int_arg(args, 4, "d3")?,
+    ];
+    let output = input.permute(dims);
+    return_tensor(context, output)
 }
 
 fn tensor_permute5(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
@@ -418,6 +872,24 @@ fn tensor_view4(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutc
         int_arg(args, 2, "d1")?,
         int_arg(args, 3, "d2")?,
         int_arg(args, 4, "d3")?,
+    ];
+    let output = input.view(shape);
+    return_tensor(context, output)
+}
+
+fn tensor_view2(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?;
+    let shape = [int_arg(args, 1, "d0")?, int_arg(args, 2, "d1")?];
+    let output = input.view(shape);
+    return_tensor(context, output)
+}
+
+fn tensor_view3(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?;
+    let shape = [
+        int_arg(args, 1, "d0")?,
+        int_arg(args, 2, "d1")?,
+        int_arg(args, 3, "d2")?,
     ];
     let output = input.view(shape);
     return_tensor(context, output)
@@ -476,6 +948,79 @@ fn tensor_fft_irfftn2(context: &mut TorchContext, args: &[Value]) -> VmResult<Ca
 fn tensor_avg_pool2d_2(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
     let input = context.tensor(int_arg(args, 0, "tensor")?)?;
     let output = input.avg_pool2d([2, 2], [2, 2], [0, 0], false, true, None);
+    return_tensor(context, output)
+}
+
+fn nn_embedding(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let indices = context.tensor(int_arg(args, 0, "indices")?)?;
+    let weight = context.tensor(int_arg(args, 1, "weight")?)?;
+    let output = Tensor::embedding(weight, indices, -1, false, false);
+    return_tensor(context, output)
+}
+
+fn nn_linear(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?.shallow_clone();
+    let weight = context.tensor(int_arg(args, 1, "weight")?)?.shallow_clone();
+    let bias_handle = int_arg(args, 2, "bias")?;
+    let bias = if bias_handle == 0 {
+        None
+    } else {
+        Some(context.tensor(bias_handle)?.shallow_clone())
+    };
+    let output = match bias {
+        Some(bias) => input.linear(&weight, Some(&bias)),
+        None => input.linear(&weight, None::<&Tensor>),
+    };
+    return_tensor(context, output)
+}
+
+fn nn_conv1d(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?.shallow_clone();
+    let weight = context.tensor(int_arg(args, 1, "weight")?)?.shallow_clone();
+    let output_kind = input.kind();
+    let bias_handle = int_arg(args, 2, "bias")?;
+    let stride = int_arg(args, 3, "stride")?;
+    let padding = int_arg(args, 4, "padding")?;
+    let dilation = int_arg(args, 5, "dilation")?;
+    let groups = int_arg(args, 6, "groups")?;
+    let bias = if bias_handle == 0 {
+        None
+    } else {
+        Some(context.tensor(bias_handle)?.shallow_clone())
+    };
+    let input_float = input.to_kind(Kind::Float);
+    let weight_float = weight.to_kind(Kind::Float);
+    let output = if stride == 1
+        && dilation == 1
+        && input_float.size().len() == 3
+        && weight_float.size().as_slice() == [groups, 1, 3]
+        && input_float.size()[1] == groups
+    {
+        let out_len = input_float.size()[2] + (2 * padding) - 2;
+        let padded = input_float.zero_pad1d(padding, padding);
+        let w0 = weight_float.select(2, 0).view([1, groups, 1]);
+        let w1 = weight_float.select(2, 1).view([1, groups, 1]);
+        let w2 = weight_float.select(2, 2).view([1, groups, 1]);
+        let mut output = padded.narrow(2, 0, out_len) * w0;
+        output = output + padded.narrow(2, 1, out_len) * w1;
+        output = output + padded.narrow(2, 2, out_len) * w2;
+        if let Some(bias) = bias.as_ref() {
+            output = output + bias.to_kind(Kind::Float).view([1, groups, 1]);
+        }
+        output
+    } else {
+        input_float
+            .f_conv1d(
+                &weight_float,
+                bias.as_ref(),
+                [stride],
+                [padding],
+                [dilation],
+                groups,
+            )
+            .map_err(|err| host_error(format!("conv1d failed: {err}")))?
+    }
+    .to_kind(output_kind);
     return_tensor(context, output)
 }
 

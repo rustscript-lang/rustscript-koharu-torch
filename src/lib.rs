@@ -12,6 +12,7 @@ use koharu_torch::{Device, Kind, Tensor};
 use vm::{Program, compile_source};
 
 use crate::host::TorchHostRuntime;
+pub use crate::host::TorchScriptRunner;
 
 pub struct LamaRustScript {
     device: Device,
@@ -135,7 +136,7 @@ impl LamaRustScript {
     }
 }
 
-async fn preload_libtorch() -> Result<()> {
+pub(crate) async fn preload_libtorch() -> Result<()> {
     let libtorch = Libtorch::for_current_target()?;
     let dylibs = libtorch.dylibs()?.collect::<Vec<_>>();
     let lib_dir = libtorch.resolve().await?.join("libtorch").join("lib");

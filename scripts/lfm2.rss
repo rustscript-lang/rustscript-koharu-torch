@@ -1,0 +1,201 @@
+use torch;
+
+let weights_path: string = torch::runtime::arg(0);
+let tokenizer_path: string = torch::runtime::arg(1);
+let system_prompt: string = torch::runtime::arg(2);
+let source_text: string = torch::runtime::arg(3);
+let max_new_tokens: int = torch::runtime::arg_int(4);
+
+let loaded_weights: int = torch::weights::load(weights_path);
+let loaded_tokenizer: bool = torch::tokenizer::load(tokenizer_path);
+
+fn weight(name: string) -> int {
+    torch::weights::get(name)
+}
+
+fn linear(input: int, name: string) -> int {
+    let w: int = weight(name);
+    torch::nn::linear(input, w, 0)
+}
+
+fn rms_norm(input: int, weight_name: string) -> int {
+    let scale_weight: int = weight(weight_name);
+    let fp32: int = torch::tensor::to_float(input);
+    let squared: int = torch::tensor::pow_scalar(fp32, 2.0);
+    let variance: int = torch::tensor::mean_dim(squared, -1, true);
+    let shifted: int = torch::tensor::add_scalar(variance, 0.00001);
+    let inv: int = torch::tensor::rsqrt(shifted);
+    let scaled: int = torch::tensor::mul(fp32, inv);
+    let normalized: int = torch::tensor::to_bfloat16(scaled);
+    torch::tensor::mul(normalized, scale_weight)
+}
+
+fn rotate_half(input: int) -> int {
+    let head_dim: int = torch::tensor::size(input, -1);
+    let half: int = head_dim / 2;
+    let first: int = torch::tensor::narrow(input, -1, 0, half);
+    let second: int = torch::tensor::narrow(input, -1, half, half);
+    let neg_second: int = torch::tensor::neg(second);
+    torch::tensor::cat2(neg_second, first, -1)
+}
+
+fn apply_rope(input: int, cos: int, sin: int) -> int {
+    let rotated: int = rotate_half(input);
+    torch::tensor::add(
+        torch::tensor::mul(input, cos),
+        torch::tensor::mul(rotated, sin)
+    )
+}
+
+fn repeat_kv(input: int) -> int {
+    torch::tensor::repeat_interleave(input, 2, 1)
+}
+
+fn attention_mixer(input: int, prefix: string) -> int {
+    let batch: int = torch::tensor::size(input, 0);
+    let seq_len: int = torch::tensor::size(input, 1);
+    let hidden: int = rms_norm(input, prefix + ".operator_norm.weight");
+
+    let q_linear: int = linear(hidden, prefix + ".self_attn.q_proj.weight");
+    let k_linear: int = linear(hidden, prefix + ".self_attn.k_proj.weight");
+    let v_linear: int = linear(hidden, prefix + ".self_attn.v_proj.weight");
+
+    let q_view: int = torch::tensor::view4(q_linear, batch, seq_len, 16, 64);
+    let k_view: int = torch::tensor::view4(k_linear, batch, seq_len, 8, 64);
+    let v_view: int = torch::tensor::view4(v_linear, batch, seq_len, 8, 64);
+
+    let q_norm: int = rms_norm(q_view, prefix + ".self_attn.q_layernorm.weight");
+    let k_norm: int = rms_norm(k_view, prefix + ".self_attn.k_layernorm.weight");
+
+    let q_heads: int = torch::tensor::transpose(q_norm, 1, 2);
+    let k_heads: int = torch::tensor::transpose(k_norm, 1, 2);
+    let v_heads: int = torch::tensor::transpose(v_view, 1, 2);
+
+    let cos: int = torch::tensor::rope_cos(seq_len, 64, 1000000.0);
+    let sin: int = torch::tensor::rope_sin(seq_len, 64, 1000000.0);
+    let q_rot: int = apply_rope(q_heads, cos, sin);
+    let k_rot: int = apply_rope(k_heads, cos, sin);
+
+    let k_full: int = repeat_kv(k_rot);
+    let v_full: int = repeat_kv(v_heads);
+    let k_t: int = torch::tensor::transpose(k_full, -2, -1);
+    let raw_scores: int = torch::tensor::matmul(q_rot, k_t);
+    let scores: int = torch::tensor::mul_scalar(raw_scores, 0.125);
+    let masked: int = torch::tensor::add(
+        torch::tensor::to_float(scores),
+        torch::tensor::causal_mask(seq_len)
+    );
+    let softmaxed: int = torch::tensor::softmax(masked, -1);
+    let probs: int = torch::tensor::to_bfloat16(softmaxed);
+    let attended: int = torch::tensor::matmul(probs, v_full);
+    let transposed: int = torch::tensor::transpose(attended, 1, 2);
+    let contiguous: int = torch::tensor::contiguous(transposed);
+    let merged: int = torch::tensor::view3(
+        contiguous,
+        batch,
+        seq_len,
+        1024
+    );
+    linear(merged, prefix + ".self_attn.out_proj.weight")
+}
+
+fn conv_mixer(input: int, prefix: string) -> int {
+    let seq_len: int = torch::tensor::size(input, 1);
+    let hidden: int = rms_norm(input, prefix + ".operator_norm.weight");
+    let projected: int = torch::tensor::transpose(
+        linear(hidden, prefix + ".conv.in_proj.weight"),
+        -1,
+        -2
+    );
+    let b_part: int = torch::tensor::narrow(projected, 1, 0, 1024);
+    let c_part: int = torch::tensor::narrow(projected, 1, 1024, 1024);
+    let x_part: int = torch::tensor::narrow(projected, 1, 2048, 1024);
+    let bx: int = torch::tensor::mul(b_part, x_part);
+    let conv_full: int = torch::nn::conv1d(
+        bx,
+        weight(prefix + ".conv.conv.weight"),
+        0,
+        1,
+        2,
+        1,
+        1024
+    );
+    let conv_trimmed: int = torch::tensor::narrow(conv_full, -1, 0, seq_len);
+    let mixed: int = torch::tensor::transpose(
+        torch::tensor::mul(c_part, conv_trimmed),
+        -1,
+        -2
+    );
+    let mixed_contiguous: int = torch::tensor::contiguous(mixed);
+    linear(mixed_contiguous, prefix + ".conv.out_proj.weight")
+}
+
+fn mlp(input: int, prefix: string) -> int {
+    let gate_linear: int = linear(input, prefix + ".w1.weight");
+    let gate: int = torch::tensor::silu(gate_linear);
+    let up: int = linear(input, prefix + ".w3.weight");
+    let gated: int = torch::tensor::mul(gate, up);
+    linear(gated, prefix + ".w2.weight")
+}
+
+fn finish_layer(input: int, prefix: string, mixed: int) -> int {
+    let hidden: int = torch::tensor::add(input, mixed);
+    let ffn_input: int = rms_norm(hidden, prefix + ".ffn_norm.weight");
+    let feed_forward: int = mlp(ffn_input, prefix + ".feed_forward");
+    torch::tensor::add(hidden, feed_forward)
+}
+
+fn conv_layer(input: int, prefix: string) -> int {
+    let mixed: int = conv_mixer(input, prefix);
+    finish_layer(input, prefix, mixed)
+}
+
+fn attention_layer(input: int, prefix: string) -> int {
+    let mixed: int = attention_mixer(input, prefix);
+    finish_layer(input, prefix, mixed)
+}
+
+fn model(input_ids: int) -> int {
+    let embed_weight: int = weight("model.embed_tokens.weight");
+    let embeddings: int = torch::nn::embedding(input_ids, embed_weight);
+    let mut hidden: int = embeddings;
+    hidden = conv_layer(hidden, "model.layers.0");
+    hidden = conv_layer(hidden, "model.layers.1");
+    hidden = attention_layer(hidden, "model.layers.2");
+    hidden = conv_layer(hidden, "model.layers.3");
+    hidden = conv_layer(hidden, "model.layers.4");
+    hidden = attention_layer(hidden, "model.layers.5");
+    hidden = conv_layer(hidden, "model.layers.6");
+    hidden = conv_layer(hidden, "model.layers.7");
+    hidden = attention_layer(hidden, "model.layers.8");
+    hidden = conv_layer(hidden, "model.layers.9");
+    hidden = attention_layer(hidden, "model.layers.10");
+    hidden = conv_layer(hidden, "model.layers.11");
+    hidden = attention_layer(hidden, "model.layers.12");
+    hidden = conv_layer(hidden, "model.layers.13");
+    hidden = attention_layer(hidden, "model.layers.14");
+    hidden = conv_layer(hidden, "model.layers.15");
+
+    let normalized: int = rms_norm(hidden, "model.embedding_norm.weight");
+    let seq_len: int = torch::tensor::size(normalized, 1);
+    let last_hidden: int = torch::tensor::select(normalized, 1, seq_len - 1);
+    let lm_head: int = torch::weights::get_or("lm_head.weight", "model.embed_tokens.weight");
+    torch::nn::linear(last_hidden, lm_head, 0)
+}
+
+let prompt_tokens: int = torch::tokenizer::encode_chat(system_prompt, source_text);
+let prompt_len: int = torch::tensor::size(prompt_tokens, 1);
+let mut tokens: int = prompt_tokens;
+let mut step: int = 0;
+while step < max_new_tokens {
+    let logits: int = model(tokens);
+    let next_token: int = torch::tensor::argmax_int(logits, -1);
+    tokens = torch::tokenizer::append_token(tokens, next_token);
+    if torch::tokenizer::is_eos(next_token) {
+        break;
+    }
+    step = step + 1;
+}
+
+let output_text: string = torch::tokenizer::decode_generated(tokens, prompt_len);
+let published: bool = torch::runtime::set_text_output(output_text);

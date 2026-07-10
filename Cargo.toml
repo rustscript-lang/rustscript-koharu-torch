@@ -12,12 +12,9 @@ image = "0.25"
 imageproc = "0.27"
 koharu-runtime = { git = "https://github.com/mayocream/koharu.git", branch = "refactor/0705", package = "koharu-runtime" }
 koharu-torch = { git = "https://github.com/mayocream/koharu.git", branch = "refactor/0705", package = "koharu-torch" }
+tokenizers = "0.22"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 vm = { package = "pd-vm", path = "../rustscript", default-features = false, features = ["runtime"] }
 
 [dev-dependencies]
 tempfile = "3"
-
-[[bin]]
-name = "lama-rustscript"
-path = "src/bin/lama.rs"
