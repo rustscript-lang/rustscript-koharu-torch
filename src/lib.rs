@@ -136,7 +136,7 @@ impl LamaRustScript {
     }
 }
 
-pub(crate) async fn preload_libtorch() -> Result<()> {
+pub async fn preload_libtorch() -> Result<()> {
     let libtorch = Libtorch::for_current_target()?;
     let dylibs = libtorch.dylibs()?.collect::<Vec<_>>();
     let lib_dir = libtorch.resolve().await?.join("libtorch").join("lib");

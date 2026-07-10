@@ -466,7 +466,7 @@ fn weights_load(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutc
 
 fn weights_get(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
     let name = string_arg(args, 0, "name")?;
-    let tensor = context.weight(name)?.shallow_clone();
+    let tensor = get_or_build_weight(context, name)?;
     return_tensor(context, tensor)
 }
 
@@ -480,6 +480,38 @@ fn weights_get_or(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOu
         .ok_or_else(|| host_error(format!("missing weight '{name}' and fallback '{fallback}'")))?
         .shallow_clone();
     return_tensor(context, tensor)
+}
+
+fn get_or_build_weight(context: &mut TorchContext, name: &str) -> VmResult<Tensor> {
+    if let Some(tensor) = context.weights.get(name) {
+        return Ok(tensor.shallow_clone());
+    }
+    let tensor = if let Some(prefix) = name.strip_suffix(".self_attn.qkv_proj.weight") {
+        let q = context
+            .weight(&format!("{prefix}.self_attn.q_proj.weight"))?
+            .shallow_clone();
+        let k = context
+            .weight(&format!("{prefix}.self_attn.k_proj.weight"))?
+            .shallow_clone();
+        let v = context
+            .weight(&format!("{prefix}.self_attn.v_proj.weight"))?
+            .shallow_clone();
+        Tensor::cat(&[&q, &k, &v], 0)
+    } else if let Some(prefix) = name.strip_suffix(".feed_forward.w1_w3.weight") {
+        let w1 = context
+            .weight(&format!("{prefix}.feed_forward.w1.weight"))?
+            .shallow_clone();
+        let w3 = context
+            .weight(&format!("{prefix}.feed_forward.w3.weight"))?
+            .shallow_clone();
+        Tensor::cat(&[&w1, &w3], 0)
+    } else {
+        return Err(host_error(format!("missing weight '{name}'")));
+    };
+    context
+        .weights
+        .insert(name.to_owned(), tensor.shallow_clone());
+    Ok(tensor)
 }
 
 fn runtime_set_output(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
@@ -1153,35 +1185,39 @@ fn nn_conv1d(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome
     };
     let input_float = input.to_kind(Kind::Float);
     let weight_float = weight.to_kind(Kind::Float);
-    let output = if stride == 1
-        && dilation == 1
-        && input_float.size().len() == 3
-        && weight_float.size().as_slice() == [groups, 1, 3]
-        && input_float.size()[1] == groups
-    {
-        let out_len = input_float.size()[2] + (2 * padding) - 2;
-        let padded = input_float.zero_pad1d(padding, padding);
-        let w0 = weight_float.select(2, 0).view([1, groups, 1]);
-        let w1 = weight_float.select(2, 1).view([1, groups, 1]);
-        let w2 = weight_float.select(2, 2).view([1, groups, 1]);
-        let mut output = padded.narrow(2, 0, out_len) * w0;
-        output = output + padded.narrow(2, 1, out_len) * w1;
-        output = output + padded.narrow(2, 2, out_len) * w2;
-        if let Some(bias) = bias.as_ref() {
-            output = output + bias.to_kind(Kind::Float).view([1, groups, 1]);
+    let native_output = input_float.f_conv1d(
+        &weight_float,
+        bias.as_ref(),
+        [stride],
+        [padding],
+        [dilation],
+        groups,
+    );
+    let output = match native_output {
+        Ok(output) => output,
+        Err(native_err) => {
+            if stride == 1
+                && dilation == 1
+                && input_float.size().len() == 3
+                && weight_float.size().as_slice() == [groups, 1, 3]
+                && input_float.size()[1] == groups
+            {
+                let out_len = input_float.size()[2] + (2 * padding) - 2;
+                let padded = input_float.zero_pad1d(padding, padding);
+                let w0 = weight_float.select(2, 0).view([1, groups, 1]);
+                let w1 = weight_float.select(2, 1).view([1, groups, 1]);
+                let w2 = weight_float.select(2, 2).view([1, groups, 1]);
+                let mut output = padded.narrow(2, 0, out_len) * w0;
+                output = output + padded.narrow(2, 1, out_len) * w1;
+                output = output + padded.narrow(2, 2, out_len) * w2;
+                if let Some(bias) = bias.as_ref() {
+                    output = output + bias.to_kind(Kind::Float).view([1, groups, 1]);
+                }
+                output
+            } else {
+                return Err(host_error(format!("conv1d failed: {native_err}")));
+            }
         }
-        output
-    } else {
-        input_float
-            .f_conv1d(
-                &weight_float,
-                bias.as_ref(),
-                [stride],
-                [padding],
-                [dilation],
-                groups,
-            )
-            .map_err(|err| host_error(format!("conv1d failed: {err}")))?
     }
     .to_kind(output_kind);
     return_tensor(context, output)

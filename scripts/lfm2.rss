@@ -6,20 +6,20 @@ let system_prompt: string = torch::runtime::arg(2);
 let source_text: string = torch::runtime::arg(3);
 let max_new_tokens: int = torch::runtime::arg_int(4);
 
-let loaded_weights: int = torch::weights::load(weights_path);
-let loaded_tokenizer: bool = torch::tokenizer::load(tokenizer_path);
+torch::weights::load(weights_path);
+torch::tokenizer::load(tokenizer_path);
 
 fn weight(name: string) -> int {
     torch::weights::get(name)
 }
 
 fn linear(input: int, name: string) -> int {
-    let w: int = weight(name);
+    let w = weight(name);
     torch::nn::linear(input, w, 0)
 }
 
 fn rms_norm(input: int, weight_name: string) -> int {
-    let scale_weight: int = weight(weight_name);
+    let scale_weight = weight(weight_name);
     let fp32: int = torch::tensor::to_float(input);
     let squared: int = torch::tensor::pow_scalar(fp32, 2.0);
     let variance: int = torch::tensor::mean_dim(squared, -1, true);
@@ -32,7 +32,7 @@ fn rms_norm(input: int, weight_name: string) -> int {
 
 fn rotate_half(input: int) -> int {
     let head_dim: int = torch::tensor::size(input, -1);
-    let half: int = head_dim / 2;
+    let half = head_dim / 2;
     let first: int = torch::tensor::narrow(input, -1, 0, half);
     let second: int = torch::tensor::narrow(input, -1, half, half);
     let neg_second: int = torch::tensor::neg(second);
@@ -56,9 +56,10 @@ fn attention_mixer(input: int, prefix: string, position: int, incremental: bool)
     let seq_len: int = torch::tensor::size(input, 1);
     let hidden: int = rms_norm(input, prefix + ".operator_norm.weight");
 
-    let q_linear: int = linear(hidden, prefix + ".self_attn.q_proj.weight");
-    let k_linear: int = linear(hidden, prefix + ".self_attn.k_proj.weight");
-    let v_linear: int = linear(hidden, prefix + ".self_attn.v_proj.weight");
+    let qkv_linear: int = linear(hidden, prefix + ".self_attn.qkv_proj.weight");
+    let q_linear: int = torch::tensor::narrow(qkv_linear, -1, 0, 1024);
+    let k_linear: int = torch::tensor::narrow(qkv_linear, -1, 1024, 512);
+    let v_linear: int = torch::tensor::narrow(qkv_linear, -1, 1536, 512);
 
     let q_view: int = torch::tensor::view4(q_linear, batch, seq_len, 16, 64);
     let k_view: int = torch::tensor::view4(k_linear, batch, seq_len, 8, 64);
@@ -76,18 +77,20 @@ fn attention_mixer(input: int, prefix: string, position: int, incremental: bool)
     let q_rot: int = apply_rope(q_heads, cos, sin);
     let k_rot: int = apply_rope(k_heads, cos, sin);
 
-    let k_cache_name: string = prefix + ".self_attn.k_cache";
-    let v_cache_name: string = prefix + ".self_attn.v_cache";
+    let k_cache_name = prefix + ".self_attn.k_cache";
+    let v_cache_name = prefix + ".self_attn.v_cache";
     let mut k_all: int = k_rot;
     let mut v_all: int = v_heads;
     if incremental {
         let old_k: int = torch::cache::get(k_cache_name);
         let old_v: int = torch::cache::get(v_cache_name);
-        k_all = torch::tensor::cat2(old_k, k_rot, 2);
-        v_all = torch::tensor::cat2(old_v, v_heads, 2);
+        let k_cat: int = torch::tensor::cat2(old_k, k_rot, 2);
+        let v_cat: int = torch::tensor::cat2(old_v, v_heads, 2);
+        k_all = k_cat;
+        v_all = v_cat;
     }
-    let k_saved: bool = torch::cache::set(k_cache_name, k_all);
-    let v_saved: bool = torch::cache::set(v_cache_name, v_all);
+    torch::cache::set(k_cache_name, k_all);
+    torch::cache::set(v_cache_name, v_all);
 
     let k_full: int = repeat_kv(k_all);
     let v_full: int = repeat_kv(v_all);
@@ -120,13 +123,12 @@ fn conv_mixer(input: int, prefix: string, incremental: bool) -> int {
     let c_part: int = torch::tensor::narrow(projected, 1, 1024, 1024);
     let x_part: int = torch::tensor::narrow(projected, 1, 2048, 1024);
     let bx: int = torch::tensor::mul(b_part, x_part);
-    let state_name: string = prefix + ".conv.state";
+    let state_name = prefix + ".conv.state";
     let mut conv_input: int = bx;
-    let mut conv_start: int = 0;
     if incremental {
         let old_state: int = torch::cache::get(state_name);
-        conv_start = torch::tensor::size(old_state, 2);
-        conv_input = torch::tensor::cat2(old_state, bx, 2);
+        let conv_cat: int = torch::tensor::cat2(old_state, bx, 2);
+        conv_input = conv_cat;
     }
     let conv_full: int = torch::nn::conv1d(
         conv_input,
@@ -138,10 +140,12 @@ fn conv_mixer(input: int, prefix: string, incremental: bool) -> int {
         1024
     );
     let state: int = torch::tensor::tail(conv_input, 2, 2);
-    let state_saved: bool = torch::cache::set(state_name, state);
+    torch::cache::set(state_name, state);
     let mut conv_trimmed: int = torch::tensor::narrow(conv_full, -1, 0, seq_len);
     if incremental {
-        conv_trimmed = torch::tensor::narrow(conv_full, -1, conv_start, 1);
+        let conv_start: int = torch::tensor::size(conv_input, 2) - seq_len;
+        let conv_tail: int = torch::tensor::narrow(conv_full, -1, conv_start, 1);
+        conv_trimmed = conv_tail;
     }
     let mixed: int = torch::tensor::transpose(
         torch::tensor::mul(c_part, conv_trimmed),
@@ -153,9 +157,11 @@ fn conv_mixer(input: int, prefix: string, incremental: bool) -> int {
 }
 
 fn mlp(input: int, prefix: string) -> int {
-    let gate_linear: int = linear(input, prefix + ".w1.weight");
+    let gate_up: int = linear(input, prefix + ".w1_w3.weight");
+    let intermediate: int = torch::tensor::size(gate_up, -1) / 2;
+    let gate_linear: int = torch::tensor::narrow(gate_up, -1, 0, intermediate);
     let gate: int = torch::tensor::silu(gate_linear);
-    let up: int = linear(input, prefix + ".w3.weight");
+    let up: int = torch::tensor::narrow(gate_up, -1, intermediate, intermediate);
     let gated: int = torch::tensor::mul(gate, up);
     linear(gated, prefix + ".w2.weight")
 }
@@ -168,17 +174,17 @@ fn finish_layer(input: int, prefix: string, mixed: int) -> int {
 }
 
 fn conv_layer(input: int, prefix: string, incremental: bool) -> int {
-    let mixed: int = conv_mixer(input, prefix, incremental);
+    let mixed = conv_mixer(input, prefix, incremental);
     finish_layer(input, prefix, mixed)
 }
 
 fn attention_layer(input: int, prefix: string, position: int, incremental: bool) -> int {
-    let mixed: int = attention_mixer(input, prefix, position, incremental);
+    let mixed = attention_mixer(input, prefix, position, incremental);
     finish_layer(input, prefix, mixed)
 }
 
 fn model(input_ids: int, position: int, incremental: bool) -> int {
-    let embed_weight: int = weight("model.embed_tokens.weight");
+    let embed_weight = weight("model.embed_tokens.weight");
     let embeddings: int = torch::nn::embedding(input_ids, embed_weight);
     let mut hidden: int = embeddings;
     hidden = conv_layer(hidden, "model.layers.0", incremental);
@@ -205,20 +211,41 @@ fn model(input_ids: int, position: int, incremental: bool) -> int {
     torch::nn::linear(last_hidden, lm_head, 0)
 }
 
+let fused_mlp_0 = weight("model.layers.0.feed_forward.w1_w3.weight");
+let fused_mlp_1 = weight("model.layers.1.feed_forward.w1_w3.weight");
+let fused_qkv_2 = weight("model.layers.2.self_attn.qkv_proj.weight");
+let fused_mlp_2 = weight("model.layers.2.feed_forward.w1_w3.weight");
+let fused_mlp_3 = weight("model.layers.3.feed_forward.w1_w3.weight");
+let fused_mlp_4 = weight("model.layers.4.feed_forward.w1_w3.weight");
+let fused_qkv_5 = weight("model.layers.5.self_attn.qkv_proj.weight");
+let fused_mlp_5 = weight("model.layers.5.feed_forward.w1_w3.weight");
+let fused_mlp_6 = weight("model.layers.6.feed_forward.w1_w3.weight");
+let fused_mlp_7 = weight("model.layers.7.feed_forward.w1_w3.weight");
+let fused_qkv_8 = weight("model.layers.8.self_attn.qkv_proj.weight");
+let fused_mlp_8 = weight("model.layers.8.feed_forward.w1_w3.weight");
+let fused_mlp_9 = weight("model.layers.9.feed_forward.w1_w3.weight");
+let fused_qkv_10 = weight("model.layers.10.self_attn.qkv_proj.weight");
+let fused_mlp_10 = weight("model.layers.10.feed_forward.w1_w3.weight");
+let fused_mlp_11 = weight("model.layers.11.feed_forward.w1_w3.weight");
+let fused_qkv_12 = weight("model.layers.12.self_attn.qkv_proj.weight");
+let fused_mlp_12 = weight("model.layers.12.feed_forward.w1_w3.weight");
+let fused_mlp_13 = weight("model.layers.13.feed_forward.w1_w3.weight");
+let fused_qkv_14 = weight("model.layers.14.self_attn.qkv_proj.weight");
+let fused_mlp_14 = weight("model.layers.14.feed_forward.w1_w3.weight");
+let fused_mlp_15 = weight("model.layers.15.feed_forward.w1_w3.weight");
+
 let prompt_tokens: int = torch::tokenizer::encode_chat(system_prompt, source_text);
 let prompt_len: int = torch::tensor::size(prompt_tokens, 1);
 let mut tokens: int = prompt_tokens;
-let mut step: int = 0;
-let mut generated_tokens: int = 0;
-let cache_cleared: bool = torch::cache::clear();
-let timer_started: bool = torch::runtime::start_timer();
-let mut logits: int = 0;
-if max_new_tokens > 0 {
-    logits = model(prompt_tokens, 0, false);
-}
+let mut step = 0;
+let mut generated_tokens = 0;
+torch::cache::clear();
+torch::runtime::start_timer();
+let mut logits = model(prompt_tokens, 0, false);
 while step < max_new_tokens {
     let next_token: int = torch::tensor::argmax_int(logits, -1);
-    tokens = torch::tokenizer::append_token(tokens, next_token);
+    let appended: int = torch::tokenizer::append_token(tokens, next_token);
+    tokens = appended;
     generated_tokens = generated_tokens + 1;
     step = step + 1;
     if torch::tokenizer::is_eos(next_token) {
@@ -232,5 +259,5 @@ while step < max_new_tokens {
 }
 
 let output_text: string = torch::tokenizer::decode_generated(tokens, prompt_len);
-let counted: bool = torch::runtime::set_token_count(generated_tokens);
-let published: bool = torch::runtime::set_text_output(output_text);
+torch::runtime::set_token_count(generated_tokens);
+torch::runtime::set_text_output(output_text);
