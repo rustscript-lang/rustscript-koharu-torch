@@ -153,11 +153,7 @@ fn conv_mixer(input: int, prefix: string, incremental: bool) -> int {
 
 fn mlp(input: int, prefix: string) -> int {
     let gate_up: int = linear(input, prefix + ".w1_w3.weight");
-    let intermediate: int = torch::tensor::size(gate_up, -1) / 2;
-    let gate_linear: int = torch::tensor::narrow(gate_up, -1, 0, intermediate);
-    let gate: int = torch::tensor::silu(gate_linear);
-    let up: int = torch::tensor::narrow(gate_up, -1, intermediate, intermediate);
-    let gated: int = torch::tensor::mul(gate, up);
+    let gated: int = torch::tensor::swiglu(gate_up);
     linear(gated, prefix + ".w2.weight")
 }
 

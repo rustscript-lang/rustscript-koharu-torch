@@ -403,10 +403,10 @@ impl Lfm2Native {
 
     fn mlp(&self, input: Tensor, layer: usize) -> Result<Tensor> {
         let gate_up = self.linear(input, &layer_name(layer, "feed_forward.w1_w3.weight"))?;
-        let intermediate = gate_up.size()[2] / 2;
-        let gate = gate_up.narrow(-1, 0, intermediate).silu();
-        let up = gate_up.narrow(-1, intermediate, intermediate);
-        self.linear(gate * up, &layer_name(layer, "feed_forward.w2.weight"))
+        self.linear(
+            swiglu(&gate_up),
+            &layer_name(layer, "feed_forward.w2.weight"),
+        )
     }
 
     fn rms_norm(&self, input: Tensor, weight_name: &str) -> Result<Tensor> {
@@ -547,6 +547,14 @@ fn rotate_half(input: &Tensor) -> Tensor {
 fn apply_rope(input: Tensor, cos: &Tensor, sin: &Tensor) -> Tensor {
     let rotated = rotate_half(&input);
     input * cos + rotated * sin
+}
+
+fn swiglu(input: &Tensor) -> Tensor {
+    let last_dim = input.size()[input.size().len() - 1];
+    let intermediate = last_dim / 2;
+    let gate = input.narrow(-1, 0, intermediate).silu();
+    let up = input.narrow(-1, intermediate, intermediate);
+    gate * up
 }
 
 fn build_rope_table(

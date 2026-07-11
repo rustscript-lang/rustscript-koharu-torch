@@ -260,7 +260,7 @@ impl TorchHostRuntime {
         self.lock()?.begin(image, mask, args);
         let mut vm = Vm::new_shared_with_jit_config(program, torch_jit_config());
         self.bind(&mut vm);
-        let status = vm.run().map_err(|err| anyhow!(err.to_string()))?;
+        let status = koharu_torch::no_grad(|| vm.run()).map_err(|err| anyhow!(err.to_string()))?;
         if status != VmStatus::Halted {
             bail!("RustScript did not halt: {status:?}");
         }
@@ -279,7 +279,7 @@ impl TorchHostRuntime {
         self.lock()?.begin_args(args);
         let mut vm = Vm::new_shared_with_jit_config(program, torch_jit_config());
         self.bind(&mut vm);
-        let status = vm.run().map_err(|err| anyhow!(err.to_string()))?;
+        let status = koharu_torch::no_grad(|| vm.run()).map_err(|err| anyhow!(err.to_string()))?;
         if status != VmStatus::Halted {
             bail!("RustScript did not halt: {status:?}");
         }
@@ -407,6 +407,7 @@ const HOST_OPS: &[(&str, HostOp)] = &[
     ("torch::tensor::relu", tensor_relu),
     ("torch::tensor::sigmoid", tensor_sigmoid),
     ("torch::tensor::silu", tensor_silu),
+    ("torch::tensor::swiglu", tensor_swiglu),
     ("torch::tensor::contiguous", tensor_contiguous),
     ("torch::tensor::permute3", tensor_permute3),
     ("torch::tensor::permute4", tensor_permute4),
@@ -775,18 +776,12 @@ fn tokenizer_decode_generated(context: &mut TorchContext, args: &[Value]) -> VmR
 }
 
 fn tokenizer_append_token(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
-    let tokens = context
-        .tensor(int_arg(args, 0, "tokens")?)?
-        .to_device(Device::Cpu)
-        .to_kind(Kind::Int64)
-        .view([-1]);
-    let mut ids = Vec::<i64>::try_from(&tokens)
-        .map_err(|err| host_error(format!("failed to copy token ids: {err}")))?;
-    ids.push(int_arg(args, 1, "token")?);
-    let len = i64::try_from(ids.len()).map_err(|_| host_error("token count out of range"))?;
-    let output = Tensor::from_slice(&ids)
-        .view([1, len])
+    let tokens = context.tensor(int_arg(args, 0, "tokens")?)?;
+    let token = int_arg(args, 1, "token")?;
+    let next = Tensor::from_slice(&[token])
+        .view([1, 1])
         .to_device(context.device);
+    let output = Tensor::cat(&[tokens, &next], 1);
     return_tensor(context, output)
 }
 
@@ -1173,6 +1168,20 @@ fn tensor_sigmoid(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOu
 
 fn tensor_silu(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
     unary_tensor(context, args, Tensor::silu)
+}
+
+fn tensor_swiglu(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?;
+    let Some(&last_dim) = input.size().last() else {
+        return Err(host_error("swiglu input must have at least one dimension"));
+    };
+    if last_dim % 2 != 0 {
+        return Err(host_error("swiglu input last dimension must be even"));
+    }
+    let intermediate = last_dim / 2;
+    let gate = input.narrow(-1, 0, intermediate).silu();
+    let up = input.narrow(-1, intermediate, intermediate);
+    return_tensor(context, gate * up)
 }
 
 fn tensor_contiguous(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
