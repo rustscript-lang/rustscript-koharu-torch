@@ -109,11 +109,11 @@ directory.
 | `--model` | `-m` | required | GGUF model path |
 | `--prompt` | `-p` | required | User prompt |
 | `--system-prompt` | `-sys` | helpful assistant | System prompt |
-| `--n-predict` | `-n` | `128` | Maximum generated tokens |
+| `--n-predict`, `--predict` | `-n` | `128` | Maximum generated tokens |
 | `--ctx-size` | `-c` | `2048` | Context size |
 | `--batch-size` | `-b` | `2048` | Logical batch size |
 | `--ubatch-size` | `-ub` | `512` | Physical batch size |
-| `--gpu-layers` | `-ngl` | `999` | Layers assigned to GPU |
+| `--gpu-layers`, `--n-gpu-layers` | `-ngl` | `999` | Layers assigned to GPU |
 | `--main-gpu` | `-mg` | `0` | Main GPU index |
 | `--threads` | `-t` | `8` | Generation threads |
 | `--threads-batch` | `-tb` | `8` | Prompt batch threads |
@@ -123,8 +123,10 @@ directory.
 | `--min-p` | | `0.0` | Min-p sampling |
 | `--seed` | `-s` | `42` | Sampling seed |
 | `--backend` | | `auto` | Package name or runtime directory |
-| `--no-mmap` | | off | Disable memory mapping |
+| `--mmap`, `--no-mmap` | | mmap enabled | Control memory mapping |
 | `--mlock` | | off | Lock model pages in memory |
+| `--ignore-eos` | | off | Continue after end-of-generation tokens |
+| `--chat-template` | | model default | Override the model chat template |
 
 At koharu commit `3a832b5`, the bundled llama.cpp `b9938` context layout is
 newer than the header used by `koharu-llama-sys`. Until those upstream pieces

@@ -27,7 +27,7 @@ let prompt_arg: int = cli::required_option::<string>(
 let predict_arg: int = cli::option::<int>(
     parser,
     128,
-    ["-n", "--n-predict"],
+    ["-n", "--predict", "--n-predict"],
     "Store",
     "Maximum generated tokens"
 );
@@ -41,7 +41,7 @@ let backend_arg: int = cli::option::<string>(
 let gpu_layers_arg: int = cli::option::<int>(
     parser,
     999,
-    ["-ngl", "--gpu-layers"],
+    ["-ngl", "--gpu-layers", "--n-gpu-layers"],
     "Store",
     "Layers stored in VRAM"
 );
@@ -95,8 +95,15 @@ let seed_arg: int = cli::option::<int>(parser, 42, ["-s", "--seed"], "Store", "S
 let mmap_arg: int = cli::option::<bool>(
     parser,
     true,
+    ["--mmap"],
+    "StoreTrue",
+    "Enable memory mapping"
+);
+let no_mmap_arg: int = cli::option::<bool>(
+    parser,
+    false,
     ["--no-mmap"],
-    "StoreFalse",
+    "StoreTrue",
     "Disable memory mapping"
 );
 let mlock_arg: int = cli::option::<bool>(
@@ -105,6 +112,20 @@ let mlock_arg: int = cli::option::<bool>(
     ["--mlock"],
     "StoreTrue",
     "Lock model pages in memory"
+);
+let ignore_eos_arg: int = cli::option::<bool>(
+    parser,
+    false,
+    ["--ignore-eos"],
+    "StoreTrue",
+    "Continue generation after an end-of-generation token"
+);
+let chat_template_arg: int = cli::option::<string>(
+    parser,
+    "",
+    ["--chat-template"],
+    "Store",
+    "Override the model chat template"
 );
 flint::cli::parse_args(parser);
 
@@ -125,8 +146,10 @@ let top_k = cli::get::<int>(top_k_arg);
 let top_p = cli::get::<float>(top_p_arg);
 let min_p = cli::get::<float>(min_p_arg);
 let seed = cli::get::<int>(seed_arg);
-let use_mmap = cli::get::<bool>(mmap_arg);
+let use_mmap = cli::get::<bool>(mmap_arg) && !cli::get::<bool>(no_mmap_arg);
 let use_mlock = cli::get::<bool>(mlock_arg);
+let ignore_eos = cli::get::<bool>(ignore_eos_arg);
+let chat_template = cli::get::<string>(chat_template_arg);
 
 let backend: int = flint::llama::backend_init(backend_name);
 let model_params: int = flint::llama::model_params_init(backend);
@@ -135,7 +158,7 @@ flint::llama::model_params_set_main_gpu(model_params, main_gpu);
 flint::llama::model_params_set_memory(model_params, use_mmap, use_mlock);
 let model: int = flint::llama::model_load(backend, model_params, model_path);
 
-let template: int = flint::llama::chat_template(model, "");
+let template: int = flint::llama::chat_template(model, chat_template);
 let messages: int = flint::llama::chat_messages_init();
 flint::llama::chat_messages_add(messages, "system", system_prompt);
 flint::llama::chat_messages_add(messages, "user", user_prompt);
@@ -166,7 +189,7 @@ let mut generated: int = 0;
 flint::runtime::start_decode_timer();
 while generated < max_new_tokens {
     let token: int = flint::llama::sampler_sample(sampler, context, -1);
-    if flint::llama::model_is_eog(model, token) {
+    if !ignore_eos && flint::llama::model_is_eog(model, token) {
         break;
     }
     flint::llama::sampler_accept(sampler, token);
