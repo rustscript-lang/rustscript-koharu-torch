@@ -340,8 +340,7 @@ impl Lfm2Native {
         let v_heads = v_view.transpose(1, 2);
         let cos = self.rope_slice(seq_len, position, RopeKind::Cos);
         let sin = self.rope_slice(seq_len, position, RopeKind::Sin);
-        let q_rot = apply_rope(q_heads, &cos, &sin);
-        let k_rot = apply_rope(k_heads, &cos, &sin);
+        let (q_rot, k_rot) = apply_rope_pair(q_heads, k_heads, &cos, &sin);
 
         let (k_all, v_all) = if incremental {
             let old_k = self
@@ -418,21 +417,21 @@ impl Lfm2Native {
     }
 
     fn finish_layer(&self, input: Tensor, layer: usize, mixed: Tensor) -> Result<Tensor> {
-        let hidden = input + mixed;
-        let ffn_input = self.rms_norm(
-            hidden.shallow_clone(),
-            &layer_name(layer, "ffn_norm.weight"),
-        )?;
+        let (hidden, ffn_input) =
+            self.add_rms_norm(input, mixed, &layer_name(layer, "ffn_norm.weight"))?;
         let feed_forward = self.mlp(ffn_input, layer)?;
         Ok(hidden + feed_forward)
     }
 
     fn mlp(&self, input: Tensor, layer: usize) -> Result<Tensor> {
         let gate_up = self.linear(input, &layer_name(layer, "feed_forward.w1_w3.weight"))?;
-        self.linear(
-            swiglu(&gate_up),
-            &layer_name(layer, "feed_forward.w2.weight"),
-        )
+        let weight = self.weight(&layer_name(layer, "feed_forward.w2.weight"))?;
+        let activated = swiglu(&gate_up);
+        Ok(if linear_mv_enabled() {
+            linear_or_mv(&activated, weight)
+        } else {
+            activated.linear(weight, None::<&Tensor>)
+        })
     }
 
     fn rms_norm(&self, input: Tensor, weight_name: &str) -> Result<Tensor> {
@@ -440,6 +439,21 @@ impl Lfm2Native {
         Ok(input
             .internal_fused_rms_norm(scale_weight.size(), Some(scale_weight), 0.00001)
             .0)
+    }
+
+    fn add_rms_norm(
+        &self,
+        input: Tensor,
+        residual: Tensor,
+        weight_name: &str,
+    ) -> Result<(Tensor, Tensor)> {
+        let hidden = input + residual;
+        let scale_weight = self.weight(weight_name)?;
+        let normalized = hidden
+            .shallow_clone()
+            .internal_fused_rms_norm(scale_weight.size(), Some(scale_weight), 0.00001)
+            .0;
+        Ok((hidden, normalized))
     }
 
     fn linear(&self, input: Tensor, weight_name: &str) -> Result<Tensor> {
@@ -578,6 +592,16 @@ fn rotate_half(input: &Tensor) -> Tensor {
 fn apply_rope(input: Tensor, cos: &Tensor, sin: &Tensor) -> Tensor {
     let rotated = rotate_half(&input);
     input * cos + rotated * sin
+}
+
+fn apply_rope_pair(query: Tensor, key: Tensor, cos: &Tensor, sin: &Tensor) -> (Tensor, Tensor) {
+    let query_heads = query.size()[1];
+    let key_heads = key.size()[1];
+    let joined = Tensor::cat(&[&query, &key], 1);
+    let rotated = apply_rope(joined, cos, sin);
+    let query = rotated.narrow(1, 0, query_heads);
+    let key = rotated.narrow(1, query_heads, key_heads);
+    (query, key)
 }
 
 fn swiglu(input: &Tensor) -> Tensor {
