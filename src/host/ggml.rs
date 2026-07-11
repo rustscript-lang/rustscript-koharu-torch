@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -13,7 +12,7 @@ use pd_host_function::pd_host_function;
 
 use crate::{CallOutcome, Value, VmResult};
 
-use super::{host_error, return_value};
+use super::{host_error, native, return_value};
 
 const SD_CPP_TAG: &str = "master-769-cc73429";
 
@@ -80,7 +79,7 @@ pub(super) fn ensure_stable_diffusion_backends(
     package: StableDiffusionCpp,
 ) -> Result<Arc<GgmlApi>> {
     preload_package_dependencies(package)?;
-    block_on_package(package.resolve())?;
+    native::block_on(package.resolve())?;
     load_backends_from_path(&stable_diffusion_package_dir(package))
 }
 
@@ -109,17 +108,10 @@ pub(super) fn stable_diffusion_package_dir(package: StableDiffusionCpp) -> PathB
         .join(package.to_string())
 }
 
-pub(super) fn load_library(path: &Path) -> Result<Library> {
-    if !path.exists() {
-        bail!("dynamic library not found: {}", path.display());
-    }
-    load_library_impl(path)
-}
-
 impl GgmlApi {
     fn load(directory: &Path) -> Result<Self> {
         let library_path = ggml_library_path(directory)?;
-        let library = load_library(&library_path)
+        let library = native::load_library(&library_path)
             .with_context(|| format!("failed to load {}", library_path.display()))?;
         unsafe {
             Ok(Self {
@@ -195,8 +187,8 @@ fn load_backends_from_path(path: &Path) -> Result<Arc<GgmlApi>> {
 fn list_stable_diffusion_devices(package: StableDiffusionCpp) -> Result<String> {
     ensure_stable_diffusion_backends(package)?;
     let directory = stable_diffusion_package_dir(package);
-    let library_path = stable_diffusion_library_path(&directory);
-    let library = load_library(&library_path)
+    let library_path = native::library_path(&directory, "stable-diffusion");
+    let library = native::load_library(&library_path)
         .with_context(|| format!("failed to load {}", library_path.display()))?;
     let sd_list_devices = unsafe {
         *library.get::<unsafe extern "C" fn(*mut c_char, usize) -> usize>(b"sd_list_devices\0")?
@@ -240,20 +232,10 @@ fn ggml_library_path(directory: &Path) -> Result<PathBuf> {
     }
 }
 
-fn stable_diffusion_library_path(directory: &Path) -> PathBuf {
-    if cfg!(windows) {
-        directory.join("stable-diffusion.dll")
-    } else if cfg!(target_os = "macos") {
-        directory.join("libstable-diffusion.dylib")
-    } else {
-        directory.join("libstable-diffusion.so")
-    }
-}
-
 fn preload_package_dependencies(package: StableDiffusionCpp) -> Result<()> {
     if matches!(package, StableDiffusionCpp::WindowsX64Cuda12) {
-        block_on_package(Cuda::Runtime12.preload())?;
-        block_on_package(Cuda::Cublas12.preload())?;
+        native::block_on(Cuda::Runtime12.preload())?;
+        native::block_on(Cuda::Cublas12.preload())?;
     }
     Ok(())
 }
@@ -288,22 +270,6 @@ fn stable_diffusion_vulkan_package() -> Result<StableDiffusionCpp> {
     }
 }
 
-fn block_on_package<T>(future: impl Future<Output = Result<T>>) -> Result<T> {
-    if tokio::runtime::Handle::try_current().is_ok() {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?
-                .block_on(future)
-        })
-    } else {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?
-            .block_on(future)
-    }
-}
-
 fn path_to_c_string(path: &Path) -> Result<CString> {
     CString::new(path.to_string_lossy().as_bytes())
         .with_context(|| format!("path contains NUL bytes: {}", path.display()))
@@ -317,20 +283,4 @@ fn c_string_lossy(value: *const c_char) -> String {
             .to_string_lossy()
             .into_owned()
     }
-}
-
-#[cfg(windows)]
-fn load_library_impl(path: &Path) -> Result<Library> {
-    use libloading::os::windows::{
-        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32, Library as WindowsLibrary,
-    };
-
-    let flags = LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32;
-    let library = unsafe { WindowsLibrary::load_with_flags(path.as_os_str(), flags) }?;
-    Ok(library.into())
-}
-
-#[cfg(not(windows))]
-fn load_library_impl(path: &Path) -> Result<Library> {
-    Ok(unsafe { Library::new(path) }?)
 }

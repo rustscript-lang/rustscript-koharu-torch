@@ -15,7 +15,7 @@ use pd_host_function::pd_host_function;
 
 use crate::{CallOutcome, Value, VmResult};
 
-use super::{ggml, host_error, return_int, return_value};
+use super::{ggml, host_error, native, return_int, return_value};
 
 #[cfg(target_env = "msvc")]
 type SamplerEnumRepr = i32;
@@ -475,8 +475,8 @@ fn prepare_native(package: StableDiffusionCpp) -> VmResult<()> {
     ggml::ensure_stable_diffusion_backends(package)
         .map_err(|err| host_error(format!("failed to load stable diffusion backends: {err:#}")))?;
     let directory = ggml::stable_diffusion_package_dir(package);
-    let library_path = stable_diffusion_library_path(&directory);
-    let library = ggml::load_library(&library_path)
+    let library_path = native::library_path(&directory, "stable-diffusion");
+    let library = native::load_library(&library_path)
         .with_context(|| format!("failed to load {}", library_path.display()))
         .map_err(|err| host_error(format!("failed to load stable-diffusion.cpp: {err:#}")))?;
 
@@ -497,16 +497,6 @@ fn prepare_native(package: StableDiffusionCpp) -> VmResult<()> {
         _library: library,
     });
     Ok(())
-}
-
-fn stable_diffusion_library_path(directory: &Path) -> PathBuf {
-    if cfg!(windows) {
-        directory.join("stable-diffusion.dll")
-    } else if cfg!(target_os = "macos") {
-        directory.join("libstable-diffusion.dylib")
-    } else {
-        directory.join("libstable-diffusion.so")
-    }
 }
 
 fn parse_weight_type(value: &str) -> VmResult<WeightType> {
