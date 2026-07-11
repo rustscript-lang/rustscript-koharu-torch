@@ -68,6 +68,35 @@ pub(super) fn runtime_arg_int_or_impl(index: i64, default: i64) -> VmResult<Call
     })
 }
 
+/// Parses one script runner argument as a float with a fallback.
+#[pd_host_function(name = "flint::runtime::arg_float_or")]
+pub(super) fn runtime_arg_float_or_impl(index: i64, default: f64) -> VmResult<CallOutcome> {
+    with_context(|context| {
+        let index = non_negative_index(index, "argument index")?;
+        let Some(value) = context.args.get(index) else {
+            return return_value(Value::Float(default));
+        };
+        let value = value
+            .parse::<f64>()
+            .map_err(|err| host_error(format!("runtime argument {index} is not a float: {err}")))?;
+        return_value(Value::Float(value))
+    })
+}
+
+/// Returns one script runner argument with a fallback.
+#[pd_host_function(name = "flint::runtime::arg_or")]
+pub(super) fn runtime_arg_or_impl(index: i64, default: &str) -> VmResult<CallOutcome> {
+    with_context(|context| {
+        let index = non_negative_index(index, "argument index")?;
+        let value = context
+            .args
+            .get(index)
+            .cloned()
+            .unwrap_or_else(|| default.to_owned());
+        return_value(Value::String(value.into()))
+    })
+}
+
 /// Publishes a tensor handle as the script output.
 #[pd_host_function(name = "flint::runtime::set_output")]
 pub(super) fn runtime_set_output_impl(tensor: i64) -> VmResult<CallOutcome> {

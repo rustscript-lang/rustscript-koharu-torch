@@ -1,0 +1,41 @@
+use flint;
+
+let model_source: string = flint::runtime::arg(0);
+let vae_path: string = flint::runtime::arg(1);
+let llm_path: string = flint::runtime::arg(2);
+let prompt: string = flint::runtime::arg(3);
+let output_path: string = flint::runtime::arg(4);
+let width: int = flint::runtime::arg_int_or(5, 1024);
+let height: int = flint::runtime::arg_int_or(6, 1024);
+let steps: int = flint::runtime::arg_int_or(7, 4);
+let seed: int = flint::runtime::arg_int_or(8, 0);
+let cfg_scale: float = flint::runtime::arg_float_or(9, 1.0);
+let backend: string = flint::runtime::arg_or(10, "auto");
+let params_backend: string = flint::runtime::arg_or(11, "auto");
+let max_vram: string = flint::runtime::arg_or(12, "auto");
+let wtype: string = flint::runtime::arg_or(13, "auto");
+let sample_method_name: string = flint::runtime::arg_or(14, "auto");
+let scheduler_name: string = flint::runtime::arg_or(15, "auto");
+
+let ctx_params: int = flint::sd::ctx_params_init();
+flint::sd::ctx_params_set_paths(ctx_params, "", model_source, vae_path, llm_path);
+flint::sd::ctx_params_set_backend(ctx_params, backend, params_backend, max_vram);
+flint::sd::ctx_params_set_wtype(ctx_params, wtype);
+flint::sd::ctx_params_set_vae_format(ctx_params, 2);
+flint::sd::ctx_params_set_flags(ctx_params, true, false, true);
+
+let ctx: int = flint::sd::new_sd_ctx(ctx_params);
+let img_params: int = flint::sd::img_gen_params_init();
+flint::sd::img_gen_params_set_prompt(img_params, prompt, "");
+flint::sd::img_gen_params_set_size(img_params, width, height);
+flint::sd::img_gen_params_set_sample(img_params, steps, seed, cfg_scale);
+let sample_method: int = flint::sd::str_to_sample_method(sample_method_name);
+let scheduler: int = flint::sd::str_to_scheduler(scheduler_name);
+flint::sd::img_gen_params_set_sampler(img_params, sample_method, scheduler);
+
+let images: int = flint::sd::generate_image(ctx, img_params);
+let generated: bool = flint::sd::images_save(images, 0, output_path);
+flint::sd::free_sd_images(images);
+flint::sd::free_sd_ctx(ctx);
+flint::runtime::set_text_output(output_path);
+generated;

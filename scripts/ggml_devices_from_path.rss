@@ -1,0 +1,6 @@
+use flint;
+
+let path: string = flint::runtime::arg(0);
+let devices: string = flint::ggml::list_devices(path);
+flint::runtime::set_text_output(devices);
+devices;

@@ -1,0 +1,6 @@
+use flint;
+
+let backend: string = flint::runtime::arg_or(0, "cpu");
+let devices: string = flint::ggml::list_stable_diffusion_devices(backend);
+flint::runtime::set_text_output(devices);
+devices;

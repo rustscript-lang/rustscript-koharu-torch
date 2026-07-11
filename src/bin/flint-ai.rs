@@ -9,11 +9,14 @@ use vm::compile_source;
 #[derive(Debug, Parser)]
 #[command(about = "Run Flint inference programs")]
 struct Cli {
-    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "lama")]
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["lama", "sd"])]
     llm: bool,
 
-    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "llm")]
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["llm", "sd"])]
     lama: bool,
+
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["llm", "lama"])]
+    sd: bool,
 
     #[arg(long, value_name = "DEVICE")]
     device: Option<String>,
@@ -43,14 +46,17 @@ async fn main() -> Result<()> {
     preload_libtorch().await?;
     let device = resolve_device(cli.device.as_deref())?;
 
-    match (cli.llm, cli.lama) {
-        (true, false) => run_llm(device, cli.script, cli.args).await,
-        (false, true) => run_lama(device, cli.weights, cli.image, cli.mask, cli.output).await,
-        _ => bail!("choose one mode: --llm or --lama"),
+    match (cli.llm, cli.lama, cli.sd) {
+        (true, false, false) => run_script(device, cli.script, cli.args).await,
+        (false, true, false) => {
+            run_lama(device, cli.weights, cli.image, cli.mask, cli.output).await
+        }
+        (false, false, true) => run_script(device, cli.script, cli.args).await,
+        _ => bail!("choose one mode: --llm, --lama, or --sd"),
     }
 }
 
-async fn run_llm(
+async fn run_script(
     device: koharu_torch::Device,
     script: Option<PathBuf>,
     args: Vec<String>,

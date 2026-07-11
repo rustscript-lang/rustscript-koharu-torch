@@ -1,10 +1,12 @@
 mod cache;
+mod ggml;
 mod pair;
 mod runtime;
+mod sd;
 
 use std::cell::{Cell, UnsafeCell};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -474,6 +476,14 @@ const HOST_OPS: &[(&str, HostOp)] = &[
         HostOp::Static(runtime::runtime_arg_int_or),
     ),
     (
+        "flint::runtime::arg_float_or",
+        HostOp::Static(runtime::runtime_arg_float_or),
+    ),
+    (
+        "flint::runtime::arg_or",
+        HostOp::Static(runtime::runtime_arg_or),
+    ),
+    (
         "flint::runtime::input",
         HostOp::Static(runtime::runtime_input),
     ),
@@ -509,6 +519,105 @@ const HOST_OPS: &[(&str, HostOp)] = &[
     ("flint::cache::has", HostOp::Static(cache::cache_has)),
     ("flint::cache::get", HostOp::Static(cache::cache_get)),
     ("flint::cache::set", HostOp::Static(cache::cache_set)),
+    (
+        "flint::ggml::load_backends",
+        HostOp::Static(ggml::ggml_load_backends),
+    ),
+    (
+        "flint::ggml::list_devices",
+        HostOp::Static(ggml::ggml_list_devices),
+    ),
+    (
+        "flint::ggml::stable_diffusion_package_dir",
+        HostOp::Static(ggml::ggml_stable_diffusion_package_dir),
+    ),
+    (
+        "flint::ggml::load_stable_diffusion_backends",
+        HostOp::Static(ggml::ggml_load_stable_diffusion_backends),
+    ),
+    (
+        "flint::ggml::list_stable_diffusion_devices",
+        HostOp::Static(ggml::ggml_list_stable_diffusion_devices),
+    ),
+    (
+        "flint::sd::ctx_params_init",
+        HostOp::Static(sd::sd_ctx_params_init),
+    ),
+    (
+        "flint::sd::ctx_params_set_paths",
+        HostOp::Static(sd::sd_ctx_params_set_paths),
+    ),
+    (
+        "flint::sd::ctx_params_set_backend",
+        HostOp::Static(sd::sd_ctx_params_set_backend),
+    ),
+    (
+        "flint::sd::ctx_params_set_wtype",
+        HostOp::Static(sd::sd_ctx_params_set_wtype),
+    ),
+    (
+        "flint::sd::ctx_params_set_vae_format",
+        HostOp::Static(sd::sd_ctx_params_set_vae_format),
+    ),
+    (
+        "flint::sd::ctx_params_set_flags",
+        HostOp::Static(sd::sd_ctx_params_set_flags),
+    ),
+    ("flint::sd::new_sd_ctx", HostOp::Static(sd::sd_new_sd_ctx)),
+    ("flint::sd::free_sd_ctx", HostOp::Static(sd::sd_free_sd_ctx)),
+    (
+        "flint::sd::img_gen_params_init",
+        HostOp::Static(sd::sd_img_gen_params_init),
+    ),
+    (
+        "flint::sd::img_gen_params_set_prompt",
+        HostOp::Static(sd::sd_img_gen_params_set_prompt),
+    ),
+    (
+        "flint::sd::img_gen_params_set_size",
+        HostOp::Static(sd::sd_img_gen_params_set_size),
+    ),
+    (
+        "flint::sd::img_gen_params_set_sample",
+        HostOp::Static(sd::sd_img_gen_params_set_sample),
+    ),
+    (
+        "flint::sd::img_gen_params_set_sampler",
+        HostOp::Static(sd::sd_img_gen_params_set_sampler),
+    ),
+    (
+        "flint::sd::str_to_sample_method",
+        HostOp::Static(sd::sd_str_to_sample_method),
+    ),
+    (
+        "flint::sd::str_to_scheduler",
+        HostOp::Static(sd::sd_str_to_scheduler),
+    ),
+    (
+        "flint::sd::sample_method_name",
+        HostOp::Static(sd::sd_sample_method_name),
+    ),
+    (
+        "flint::sd::scheduler_name",
+        HostOp::Static(sd::sd_scheduler_name),
+    ),
+    (
+        "flint::sd::get_default_sample_method",
+        HostOp::Static(sd::sd_get_default_sample_method),
+    ),
+    (
+        "flint::sd::get_default_scheduler",
+        HostOp::Static(sd::sd_get_default_scheduler),
+    ),
+    (
+        "flint::sd::generate_image",
+        HostOp::Static(sd::sd_generate_image),
+    ),
+    ("flint::sd::images_save", HostOp::Static(sd::sd_images_save)),
+    (
+        "flint::sd::free_sd_images",
+        HostOp::Static(sd::sd_free_sd_images),
+    ),
     ("flint::tokenizer::load", HostOp::Context(tokenizer_load)),
     (
         "flint::tokenizer::encode_chat",
@@ -517,6 +626,10 @@ const HOST_OPS: &[(&str, HostOp)] = &[
     (
         "flint::tokenizer::encode_vl_chat",
         HostOp::Context(tokenizer_encode_vl_chat),
+    ),
+    (
+        "flint::tokenizer::encode_padded",
+        HostOp::Context(tokenizer_encode_padded),
     ),
     (
         "flint::tokenizer::decode_generated",
@@ -552,6 +665,10 @@ const HOST_OPS: &[(&str, HostOp)] = &[
     ),
     ("flint::weights::load", HostOp::Context(weights_load)),
     ("flint::weights::get", HostOp::Context(weights_get)),
+    (
+        "flint::weights::get_indexed",
+        HostOp::Context(weights_get_indexed),
+    ),
     ("flint::weights::get_or", HostOp::Context(weights_get_or)),
     (
         "flint::weights::get_optional",
@@ -562,6 +679,14 @@ const HOST_OPS: &[(&str, HostOp)] = &[
     ("flint::pair::global", HostOp::Static(pair::pair_global)),
     ("flint::tensor::size", HostOp::Context(tensor_size)),
     ("flint::tensor::shape", HostOp::Context(tensor_shape)),
+    (
+        "flint::tensor::save_safetensors",
+        HostOp::Context(tensor_save_safetensors),
+    ),
+    (
+        "flint::tensor::load_safetensors",
+        HostOp::Context(tensor_load_safetensors),
+    ),
     ("flint::tensor::to_float", HostOp::Context(tensor_to_float)),
     (
         "flint::tensor::to_bfloat16",
@@ -575,6 +700,10 @@ const HOST_OPS: &[(&str, HostOp)] = &[
     (
         "flint::tensor::causal_mask",
         HostOp::Context(tensor_causal_mask),
+    ),
+    (
+        "flint::tensor::causal_padding_mask",
+        HostOp::Context(tensor_causal_padding_mask),
     ),
     ("flint::tensor::rope_cos", HostOp::Context(tensor_rope_cos)),
     ("flint::tensor::rope_sin", HostOp::Context(tensor_rope_sin)),
@@ -694,6 +823,10 @@ const HOST_OPS: &[(&str, HostOp)] = &[
     (
         "flint::nn::scaled_dot_product_attention",
         HostOp::Context(nn_scaled_dot_product_attention),
+    ),
+    (
+        "flint::nn::scaled_dot_product_attention_masked",
+        HostOp::Context(nn_scaled_dot_product_attention_masked),
     ),
     ("flint::nn::conv1d", HostOp::Context(nn_conv1d)),
     ("flint::nn::conv1d_step", HostOp::Context(nn_conv1d_step)),
@@ -891,8 +1024,7 @@ fn weights_load(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutc
     {
         context.weight_handles.clear();
         context.conv1d_step_weights.clear();
-        let weights = Tensor::read_safetensors(&path)
-            .map_err(|err| host_error(format!("failed to read {}: {err}", path.display())))?
+        let weights = read_weight_safetensors(&path)?
             .into_iter()
             .map(|(name, tensor)| {
                 (
@@ -910,6 +1042,43 @@ fn weights_load(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutc
     return_int(count)
 }
 
+fn read_weight_safetensors(path: &Path) -> VmResult<Vec<(String, Tensor)>> {
+    if path.is_dir() {
+        let mut files = std::fs::read_dir(path)
+            .map_err(|err| host_error(format!("failed to read {}: {err}", path.display())))?
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.path())
+                    .map_err(|err| host_error(format!("failed to read {}: {err}", path.display())))
+            })
+            .collect::<VmResult<Vec<_>>>()?;
+        files.retain(|file| {
+            file.extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("safetensors"))
+        });
+        files.sort();
+        if files.is_empty() {
+            return Err(host_error(format!(
+                "{} contains no safetensors files",
+                path.display()
+            )));
+        }
+        let mut tensors = Vec::new();
+        for file in files {
+            tensors.extend(
+                Tensor::read_safetensors(&file).map_err(|err| {
+                    host_error(format!("failed to read {}: {err}", file.display()))
+                })?,
+            );
+        }
+        Ok(tensors)
+    } else {
+        Tensor::read_safetensors(path)
+            .map_err(|err| host_error(format!("failed to read {}: {err}", path.display())))
+    }
+}
+
 fn weights_get(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
     let name = string_arg(args, 0, "name")?;
     if let Some(handle) = cached_weight_handle(context, name) {
@@ -918,6 +1087,18 @@ fn weights_get(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutco
         let tensor = get_or_build_weight(context, name)?;
         return_weight_tensor(context, name, tensor)
     }
+}
+
+fn weights_get_indexed(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let prefix = string_arg(args, 0, "prefix")?;
+    let index = int_arg(args, 1, "index")?;
+    let suffix = string_arg(args, 2, "suffix")?;
+    let name = format!("{prefix}{index}{suffix}");
+    if let Some(handle) = cached_weight_handle(context, &name) {
+        return return_int(handle);
+    }
+    let tensor = get_or_build_weight(context, &name)?;
+    return_weight_tensor(context, &name, tensor)
 }
 
 fn cached_weight_handle(context: &TorchContext, name: &str) -> Option<i64> {
@@ -1073,6 +1254,46 @@ fn tokenizer_encode_vl_chat(context: &mut TorchContext, args: &[Value]) -> VmRes
     return_tensor(context, tensor)
 }
 
+fn tokenizer_encode_padded(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let text = string_arg(args, 0, "text")?;
+    let max_len = usize::try_from(int_arg(args, 1, "max_len")?)
+        .map_err(|_| host_error("max_len must be non-negative"))?;
+    let pad_token = int_arg(args, 2, "pad_token")?;
+    let add_special_tokens = bool_arg(args, 3, "add_special_tokens")?;
+    let tokenizer = context
+        .tokenizer
+        .as_ref()
+        .ok_or_else(|| host_error("tokenizer has not been loaded"))?;
+    let encoding = tokenizer
+        .encode(text, add_special_tokens)
+        .map_err(|err| host_error(format!("tokenizer encode failed: {err}")))?;
+    let mut ids = encoding
+        .get_ids()
+        .iter()
+        .map(|value| i64::from(*value))
+        .collect::<Vec<_>>();
+    ids.truncate(max_len);
+    let mut mask = vec![1i64; ids.len()];
+    if ids.len() < max_len {
+        let missing = max_len - ids.len();
+        ids.extend(std::iter::repeat_n(pad_token, missing));
+        mask.extend(std::iter::repeat_n(0i64, missing));
+    }
+    let max_len = i64::try_from(max_len).map_err(|_| host_error("max_len out of range"))?;
+    let ids_tensor = Tensor::from_slice(&ids)
+        .view([1, max_len])
+        .to_device(context.device);
+    let mask_tensor = Tensor::from_slice(&mask)
+        .view([1, max_len])
+        .to_device(context.device);
+    let ids_handle = context.insert_tensor(ids_tensor);
+    let mask_handle = context.insert_tensor(mask_tensor);
+    return_int(context.insert_pair(FfcPair {
+        local: ids_handle,
+        global: mask_handle,
+    }))
+}
+
 fn tokenizer_decode_generated(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
     let tokens = context
         .tensor(int_arg(args, 0, "tokens")?)?
@@ -1201,6 +1422,32 @@ fn tensor_shape(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutc
     return_value(Value::String(format!("{:?}", tensor.size()).into()))
 }
 
+fn tensor_save_safetensors(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let tensor = context
+        .tensor(int_arg(args, 0, "tensor")?)?
+        .to_device(Device::Cpu)
+        .contiguous();
+    let path = PathBuf::from(string_arg(args, 1, "path")?);
+    let name = string_arg(args, 2, "name")?;
+    ensure_parent_dir(&path)?;
+    Tensor::write_safetensors(&[(name, &tensor)], &path)
+        .map_err(|err| host_error(format!("failed to write {}: {err}", path.display())))?;
+    return_value(Value::Bool(true))
+}
+
+fn tensor_load_safetensors(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let path = PathBuf::from(string_arg(args, 0, "path")?);
+    let name = string_arg(args, 1, "name")?;
+    let tensors = Tensor::read_safetensors(&path)
+        .map_err(|err| host_error(format!("failed to read {}: {err}", path.display())))?;
+    let tensor = tensors
+        .into_iter()
+        .find_map(|(tensor_name, tensor)| (tensor_name == name).then_some(tensor))
+        .ok_or_else(|| host_error(format!("missing tensor '{name}' in {}", path.display())))?
+        .to_device(context.device);
+    return_tensor(context, tensor)
+}
+
 fn tensor_to_float(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
     unary_tensor(context, args, |input| input.to_kind(Kind::Float))
 }
@@ -1248,6 +1495,36 @@ fn tensor_causal_mask(context: &mut TorchContext, args: &[Value]) -> VmResult<Ca
     let output = zeros
         .masked_fill(&blocked, f64::NEG_INFINITY)
         .view([1, 1, seq_len, seq_len]);
+    return_tensor(context, output)
+}
+
+fn tensor_causal_padding_mask(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let attention_mask = context
+        .tensor(int_arg(args, 0, "attention_mask")?)?
+        .to_device(Device::Cpu)
+        .to_kind(Kind::Int64);
+    let size = attention_mask.size();
+    if size.len() != 2 {
+        return Err(host_error("attention_mask must have rank 2"));
+    }
+    let batch = usize::try_from(size[0]).map_err(|_| host_error("batch size out of range"))?;
+    let seq_len = usize::try_from(size[1]).map_err(|_| host_error("seq_len out of range"))?;
+    let mask_values = Vec::<i64>::try_from(&attention_mask.view([-1]))
+        .map_err(|err| host_error(format!("failed to copy attention mask: {err}")))?;
+    let masked = f32::NEG_INFINITY;
+    let mut values = Vec::with_capacity(batch * seq_len * seq_len);
+    for b in 0..batch {
+        for i in 0..seq_len {
+            for j in 0..seq_len {
+                let key_valid = mask_values[b * seq_len + j] != 0;
+                let causal = j <= i;
+                values.push(if key_valid && causal { 0.0 } else { masked });
+            }
+        }
+    }
+    let output = Tensor::from_slice(&values)
+        .view([batch as i64, 1, seq_len as i64, seq_len as i64])
+        .to_device(context.device);
     return_tensor(context, output)
 }
 
@@ -1379,6 +1656,16 @@ fn is_float_kind(kind: Kind) -> bool {
             | Kind::Float8e5m2fnuz
             | Kind::Float8e4m3fnuz
     )
+}
+
+fn ensure_parent_dir(path: &Path) -> VmResult<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| host_error(format!("failed to create {}: {err}", parent.display())))?;
+    }
+    Ok(())
 }
 
 fn tensor_add(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
@@ -1945,6 +2232,27 @@ fn nn_scaled_dot_product_attention(
         None::<&Tensor>,
         0.0,
         is_causal,
+        None,
+        false,
+    );
+    return_tensor(context, output)
+}
+
+fn nn_scaled_dot_product_attention_masked(
+    context: &mut TorchContext,
+    args: &[Value],
+) -> VmResult<CallOutcome> {
+    let query = context.tensor(int_arg(args, 0, "query")?)?.shallow_clone();
+    let key = context.tensor(int_arg(args, 1, "key")?)?.shallow_clone();
+    let value = context.tensor(int_arg(args, 2, "value")?)?.shallow_clone();
+    let mask = context.tensor(int_arg(args, 3, "mask")?)?.shallow_clone();
+    let output = Tensor::scaled_dot_product_attention(
+        &query,
+        &key,
+        &value,
+        Some(&mask),
+        0.0,
+        false,
         None,
         false,
     );

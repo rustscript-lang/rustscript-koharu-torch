@@ -1110,6 +1110,7 @@ dependencies = [
  "imageproc",
  "koharu-runtime",
  "koharu-torch",
+ "libloading 0.8.9",
  "pd-host-function",
  "pd-vm",
  "tempfile",
@@ -1848,7 +1849,7 @@ dependencies = [
 [[package]]
 name = "koharu-bindgen"
 version = "0.61.2"
-source = "git+https://github.com/mayocream/koharu.git?rev=efdcc462427dd816d81fe4b11a5ea00ef015f805#efdcc462427dd816d81fe4b11a5ea00ef015f805"
+source = "git+https://github.com/mayocream/koharu.git?branch=refactor%2F0705#efdcc462427dd816d81fe4b11a5ea00ef015f805"
 dependencies = [
  "anyhow",
  "bindgen",
@@ -1862,7 +1863,7 @@ dependencies = [
 [[package]]
 name = "koharu-runtime"
 version = "0.61.2"
-source = "git+https://github.com/mayocream/koharu.git?rev=efdcc462427dd816d81fe4b11a5ea00ef015f805#efdcc462427dd816d81fe4b11a5ea00ef015f805"
+source = "git+https://github.com/mayocream/koharu.git?branch=refactor%2F0705#efdcc462427dd816d81fe4b11a5ea00ef015f805"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1889,7 +1890,7 @@ dependencies = [
 [[package]]
 name = "koharu-torch"
 version = "0.61.2"
-source = "git+https://github.com/mayocream/koharu.git?rev=efdcc462427dd816d81fe4b11a5ea00ef015f805#efdcc462427dd816d81fe4b11a5ea00ef015f805"
+source = "git+https://github.com/mayocream/koharu.git?branch=refactor%2F0705#efdcc462427dd816d81fe4b11a5ea00ef015f805"
 dependencies = [
  "half",
  "koharu-torch-sys",
@@ -1905,7 +1906,7 @@ dependencies = [
 [[package]]
 name = "koharu-torch-sys"
 version = "0.61.2"
-source = "git+https://github.com/mayocream/koharu.git?rev=efdcc462427dd816d81fe4b11a5ea00ef015f805#efdcc462427dd816d81fe4b11a5ea00ef015f805"
+source = "git+https://github.com/mayocream/koharu.git?branch=refactor%2F0705#efdcc462427dd816d81fe4b11a5ea00ef015f805"
 dependencies = [
  "anyhow",
  "cmake",
