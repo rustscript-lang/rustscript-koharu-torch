@@ -134,7 +134,7 @@ are aligned, pass a compatible runtime directory such as `b8665` as the
 `backend` argument.
 
 `scripts/flux_klein.rss` builds a FLUX.2 Klein text-to-image run from the
-low-level `flint::sd::*` API backed by `koharu-diffusion`. The native
+low-level `flint::diffusion::*` API backed by `koharu-diffusion`. The native
 stable-diffusion.cpp runtime is packaged by `koharu-runtime`; pass the FLUX.2
 Klein diffusion model, VAE, and Qwen3 text encoder paths explicitly.
 
@@ -225,36 +225,36 @@ flint::ggml::list_stable_diffusion_devices
 select the packaged ggml runtime with the same backend strings accepted by the
 SD host functions.
 
-### Stable Diffusion
+### Diffusion
 
 Low-level stable-diffusion.cpp host functions:
 
 ```text
-flint::sd::ctx_params_init
-flint::sd::ctx_params_set_paths
-flint::sd::ctx_params_set_backend
-flint::sd::ctx_params_set_wtype
-flint::sd::ctx_params_set_vae_format
-flint::sd::ctx_params_set_flags
-flint::sd::new_sd_ctx
-flint::sd::free_sd_ctx
-flint::sd::img_gen_params_init
-flint::sd::img_gen_params_set_prompt
-flint::sd::img_gen_params_set_size
-flint::sd::img_gen_params_set_sample
-flint::sd::img_gen_params_set_sampler
-flint::sd::str_to_sample_method
-flint::sd::str_to_scheduler
-flint::sd::sample_method_name
-flint::sd::scheduler_name
-flint::sd::get_default_sample_method
-flint::sd::get_default_scheduler
-flint::sd::generate_image
-flint::sd::images_save
-flint::sd::free_sd_images
+flint::diffusion::ctx_params_init
+flint::diffusion::ctx_params_set_paths
+flint::diffusion::ctx_params_set_backend
+flint::diffusion::ctx_params_set_wtype
+flint::diffusion::ctx_params_set_vae_format
+flint::diffusion::ctx_params_set_flags
+flint::diffusion::new_sd_ctx
+flint::diffusion::free_sd_ctx
+flint::diffusion::img_gen_params_init
+flint::diffusion::img_gen_params_set_prompt
+flint::diffusion::img_gen_params_set_size
+flint::diffusion::img_gen_params_set_sample
+flint::diffusion::img_gen_params_set_sampler
+flint::diffusion::str_to_sample_method
+flint::diffusion::str_to_scheduler
+flint::diffusion::sample_method_name
+flint::diffusion::scheduler_name
+flint::diffusion::get_default_sample_method
+flint::diffusion::get_default_scheduler
+flint::diffusion::generate_image
+flint::diffusion::images_save
+flint::diffusion::free_sd_images
 ```
 
-The `flint::sd::*` functions expose C API-shaped resource handles backed by
+The `flint::diffusion::*` functions expose C API-shaped resource handles backed by
 the owning context, parameter, and image types from `koharu-diffusion`.
 Optional backend strings follow sd.cpp names such as `cpu`, `cuda0`, or
 assignment specs like `te=cpu,vae=cpu,diffusion=cuda0`. Passing `cpu`, `cuda*`,

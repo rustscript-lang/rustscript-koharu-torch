@@ -61,7 +61,7 @@ fn next_sd_handle() -> i64 {
 }
 
 /// Creates default stable-diffusion.cpp context parameters and returns a handle.
-#[pd_host_function(name = "flint::sd::ctx_params_init")]
+#[pd_host_function(name = "flint::diffusion::ctx_params_init")]
 pub(super) fn sd_ctx_params_init_impl() -> VmResult<CallOutcome> {
     let handle = next_sd_handle();
     SD_CTX_PARAMS_HANDLES
@@ -72,7 +72,7 @@ pub(super) fn sd_ctx_params_init_impl() -> VmResult<CallOutcome> {
 }
 
 /// Sets model-related paths on stable-diffusion.cpp context parameters.
-#[pd_host_function(name = "flint::sd::ctx_params_set_paths")]
+#[pd_host_function(name = "flint::diffusion::ctx_params_set_paths")]
 pub(super) fn sd_ctx_params_set_paths_impl(
     handle: i64,
     model_path: &str,
@@ -94,7 +94,7 @@ pub(super) fn sd_ctx_params_set_paths_impl(
 }
 
 /// Sets backend placement options on stable-diffusion.cpp context parameters.
-#[pd_host_function(name = "flint::sd::ctx_params_set_backend")]
+#[pd_host_function(name = "flint::diffusion::ctx_params_set_backend")]
 pub(super) fn sd_ctx_params_set_backend_impl(
     handle: i64,
     backend: &str,
@@ -115,7 +115,7 @@ pub(super) fn sd_ctx_params_set_backend_impl(
 }
 
 /// Sets the model weight type on stable-diffusion.cpp context parameters.
-#[pd_host_function(name = "flint::sd::ctx_params_set_wtype")]
+#[pd_host_function(name = "flint::diffusion::ctx_params_set_wtype")]
 pub(super) fn sd_ctx_params_set_wtype_impl(handle: i64, wtype: &str) -> VmResult<CallOutcome> {
     let mut handles = SD_CTX_PARAMS_HANDLES
         .lock()
@@ -128,7 +128,7 @@ pub(super) fn sd_ctx_params_set_wtype_impl(handle: i64, wtype: &str) -> VmResult
 }
 
 /// Sets the VAE tensor naming/layout format.
-#[pd_host_function(name = "flint::sd::ctx_params_set_vae_format")]
+#[pd_host_function(name = "flint::diffusion::ctx_params_set_vae_format")]
 pub(super) fn sd_ctx_params_set_vae_format_impl(
     handle: i64,
     vae_format: i64,
@@ -145,7 +145,7 @@ pub(super) fn sd_ctx_params_set_vae_format_impl(
 }
 
 /// Sets mmap and attention flags on stable-diffusion.cpp context parameters.
-#[pd_host_function(name = "flint::sd::ctx_params_set_flags")]
+#[pd_host_function(name = "flint::diffusion::ctx_params_set_flags")]
 pub(super) fn sd_ctx_params_set_flags_impl(
     handle: i64,
     enable_mmap: bool,
@@ -165,7 +165,7 @@ pub(super) fn sd_ctx_params_set_flags_impl(
 }
 
 /// Creates a stable-diffusion.cpp context through koharu-diffusion.
-#[pd_host_function(name = "flint::sd::new_sd_ctx")]
+#[pd_host_function(name = "flint::diffusion::new_sd_ctx")]
 pub(super) fn sd_new_sd_ctx_impl(params_handle: i64) -> VmResult<CallOutcome> {
     let pending = SD_CTX_PARAMS_HANDLES
         .lock()
@@ -218,7 +218,7 @@ pub(super) fn sd_new_sd_ctx_impl(params_handle: i64) -> VmResult<CallOutcome> {
 }
 
 /// Drops an owning koharu-diffusion context handle.
-#[pd_host_function(name = "flint::sd::free_sd_ctx")]
+#[pd_host_function(name = "flint::diffusion::free_sd_ctx")]
 pub(super) fn sd_free_sd_ctx_impl(ctx_handle: i64) -> VmResult<CallOutcome> {
     SD_CTX_HANDLES
         .lock()
@@ -229,7 +229,7 @@ pub(super) fn sd_free_sd_ctx_impl(ctx_handle: i64) -> VmResult<CallOutcome> {
 }
 
 /// Creates default image-generation parameters.
-#[pd_host_function(name = "flint::sd::img_gen_params_init")]
+#[pd_host_function(name = "flint::diffusion::img_gen_params_init")]
 pub(super) fn sd_img_gen_params_init_impl() -> VmResult<CallOutcome> {
     let handle = next_sd_handle();
     SD_IMG_PARAMS_HANDLES
@@ -240,7 +240,7 @@ pub(super) fn sd_img_gen_params_init_impl() -> VmResult<CallOutcome> {
 }
 
 /// Sets prompt strings on image-generation parameters.
-#[pd_host_function(name = "flint::sd::img_gen_params_set_prompt")]
+#[pd_host_function(name = "flint::diffusion::img_gen_params_set_prompt")]
 pub(super) fn sd_img_gen_params_set_prompt_impl(
     handle: i64,
     prompt: &str,
@@ -258,7 +258,7 @@ pub(super) fn sd_img_gen_params_set_prompt_impl(
 }
 
 /// Sets output dimensions on image-generation parameters.
-#[pd_host_function(name = "flint::sd::img_gen_params_set_size")]
+#[pd_host_function(name = "flint::diffusion::img_gen_params_set_size")]
 pub(super) fn sd_img_gen_params_set_size_impl(
     handle: i64,
     width: i64,
@@ -278,7 +278,7 @@ pub(super) fn sd_img_gen_params_set_size_impl(
 }
 
 /// Sets sampling options on image-generation parameters.
-#[pd_host_function(name = "flint::sd::img_gen_params_set_sample")]
+#[pd_host_function(name = "flint::diffusion::img_gen_params_set_sample")]
 pub(super) fn sd_img_gen_params_set_sample_impl(
     handle: i64,
     steps: i64,
@@ -303,7 +303,7 @@ pub(super) fn sd_img_gen_params_set_sample_impl(
 }
 
 /// Sets sample method and scheduler on image-generation parameters.
-#[pd_host_function(name = "flint::sd::img_gen_params_set_sampler")]
+#[pd_host_function(name = "flint::diffusion::img_gen_params_set_sampler")]
 pub(super) fn sd_img_gen_params_set_sampler_impl(
     handle: i64,
     sample_method: i64,
@@ -326,7 +326,7 @@ pub(super) fn sd_img_gen_params_set_sampler_impl(
 }
 
 /// Converts a sample method name to its enum value.
-#[pd_host_function(name = "flint::sd::str_to_sample_method")]
+#[pd_host_function(name = "flint::diffusion::str_to_sample_method")]
 pub(super) fn sd_str_to_sample_method_impl(name: &str) -> VmResult<CallOutcome> {
     let name = normalize_auto(name);
     let value = SampleMethod::from_str(name).map_err(diffusion_error)?;
@@ -334,7 +334,7 @@ pub(super) fn sd_str_to_sample_method_impl(name: &str) -> VmResult<CallOutcome> 
 }
 
 /// Converts a scheduler name to its enum value.
-#[pd_host_function(name = "flint::sd::str_to_scheduler")]
+#[pd_host_function(name = "flint::diffusion::str_to_scheduler")]
 pub(super) fn sd_str_to_scheduler_impl(name: &str) -> VmResult<CallOutcome> {
     let name = normalize_auto(name);
     let value = Scheduler::from_str(name).map_err(diffusion_error)?;
@@ -342,7 +342,7 @@ pub(super) fn sd_str_to_scheduler_impl(name: &str) -> VmResult<CallOutcome> {
 }
 
 /// Converts a sample method enum value to its name.
-#[pd_host_function(name = "flint::sd::sample_method_name")]
+#[pd_host_function(name = "flint::diffusion::sample_method_name")]
 pub(super) fn sd_sample_method_name_impl(sample_method: i64) -> VmResult<CallOutcome> {
     let value =
         SampleMethod::try_from(checked_i32(sample_method, "sample_method")? as SamplerEnumRepr)
@@ -351,7 +351,7 @@ pub(super) fn sd_sample_method_name_impl(sample_method: i64) -> VmResult<CallOut
 }
 
 /// Converts a scheduler enum value to its name.
-#[pd_host_function(name = "flint::sd::scheduler_name")]
+#[pd_host_function(name = "flint::diffusion::scheduler_name")]
 pub(super) fn sd_scheduler_name_impl(scheduler: i64) -> VmResult<CallOutcome> {
     let value = Scheduler::try_from(checked_i32(scheduler, "scheduler")? as SamplerEnumRepr)
         .map_err(diffusion_error)?;
@@ -359,7 +359,7 @@ pub(super) fn sd_scheduler_name_impl(scheduler: i64) -> VmResult<CallOutcome> {
 }
 
 /// Gets the model-specific default sample method for a context.
-#[pd_host_function(name = "flint::sd::get_default_sample_method")]
+#[pd_host_function(name = "flint::diffusion::get_default_sample_method")]
 pub(super) fn sd_get_default_sample_method_impl(ctx_handle: i64) -> VmResult<CallOutcome> {
     let handles = SD_CTX_HANDLES
         .lock()
@@ -372,7 +372,7 @@ pub(super) fn sd_get_default_sample_method_impl(ctx_handle: i64) -> VmResult<Cal
 }
 
 /// Gets the model-specific default scheduler for a sampler.
-#[pd_host_function(name = "flint::sd::get_default_scheduler")]
+#[pd_host_function(name = "flint::diffusion::get_default_scheduler")]
 pub(super) fn sd_get_default_scheduler_impl(
     ctx_handle: i64,
     sample_method: i64,
@@ -393,7 +393,7 @@ pub(super) fn sd_get_default_scheduler_impl(
 }
 
 /// Runs image generation and returns an owned image batch handle.
-#[pd_host_function(name = "flint::sd::generate_image")]
+#[pd_host_function(name = "flint::diffusion::generate_image")]
 pub(super) fn sd_generate_image_impl(ctx_handle: i64, params_handle: i64) -> VmResult<CallOutcome> {
     let params = SD_IMG_PARAMS_HANDLES
         .lock()
@@ -417,7 +417,7 @@ pub(super) fn sd_generate_image_impl(ctx_handle: i64, params_handle: i64) -> VmR
 }
 
 /// Saves one image from an owned image batch handle.
-#[pd_host_function(name = "flint::sd::images_save")]
+#[pd_host_function(name = "flint::diffusion::images_save")]
 pub(super) fn sd_images_save_impl(
     images_handle: i64,
     index: i64,
@@ -448,7 +448,7 @@ pub(super) fn sd_images_save_impl(
 }
 
 /// Drops an owned image batch handle.
-#[pd_host_function(name = "flint::sd::free_sd_images")]
+#[pd_host_function(name = "flint::diffusion::free_sd_images")]
 pub(super) fn sd_free_sd_images_impl(images_handle: i64) -> VmResult<CallOutcome> {
     SD_IMAGES_HANDLES
         .lock()

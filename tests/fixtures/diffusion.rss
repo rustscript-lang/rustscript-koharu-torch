@@ -1,0 +1,7 @@
+use flint;
+
+let sample_method: int = flint::diffusion::str_to_sample_method("euler");
+let scheduler: int = flint::diffusion::str_to_scheduler("simple");
+let result: string = flint::diffusion::sample_method_name(sample_method) + ":" + flint::diffusion::scheduler_name(scheduler);
+flint::runtime::set_text_output(result);
+result;

@@ -54,3 +54,11 @@ fn cli_host_rejects_missing_required_options() {
             .contains("required argument '-n' is missing")
     );
 }
+
+#[test]
+fn diffusion_namespace_is_bound_at_runtime() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/diffusion.rss");
+    let program = Arc::new(compile_script_file(path).unwrap().program);
+    let output = ScriptRunner::new().run_text(program, Vec::new()).unwrap();
+    assert_eq!(output.text, "euler:simple");
+}
