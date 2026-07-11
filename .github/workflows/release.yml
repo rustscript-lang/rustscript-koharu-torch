@@ -35,7 +35,8 @@ jobs:
             platform: linux-x86_64
             exe_suffix: ""
             libtorch_device: cpu
-          - os: windows-latest
+          # CUDA 13.1 integrates with Visual Studio 2022, available on this image.
+          - os: windows-2022
             platform: windows-x86_64
             exe_suffix: ".exe"
             libtorch_device: cu130
