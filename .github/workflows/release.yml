@@ -55,6 +55,10 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Patch Koharu C enum ABI compatibility
+        working-directory: flint
+        run: python .github/scripts/patch-koharu-diffusion.py
+
       - name: Preload Unix LibTorch
         if: runner.os != 'Windows'
         working-directory: flint
