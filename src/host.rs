@@ -492,6 +492,7 @@ const HOST_OPS: &[(&str, HostOp)] = &[
         nn_scaled_dot_product_attention,
     ),
     ("torch::nn::conv1d", nn_conv1d),
+    ("torch::nn::conv1d_step", nn_conv1d_step),
     ("torch::nn::conv2d", nn_conv2d),
     ("torch::nn::conv_transpose2d", nn_conv_transpose2d),
     ("torch::nn::batch_norm2d", nn_batch_norm2d),
@@ -1744,6 +1745,43 @@ fn nn_conv1d(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome
     }
     .to_kind(output_kind);
     return_tensor(context, output)
+}
+
+fn nn_conv1d_step(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let state = context.tensor(int_arg(args, 0, "state")?)?.shallow_clone();
+    let input = context.tensor(int_arg(args, 1, "input")?)?.shallow_clone();
+    let weight = context.tensor(int_arg(args, 2, "weight")?)?.shallow_clone();
+    let state_size = state.size();
+    let input_size = input.size();
+    let weight_size = weight.size();
+    if state_size.len() != 3
+        || input_size.len() != 3
+        || weight_size.as_slice() != [input_size[1], 1, 3]
+    {
+        return Err(host_error(
+            "conv1d_step expects state [B,C,2], input [B,C,1], weight [C,1,3]",
+        ));
+    }
+    if state_size[0] != input_size[0]
+        || state_size[1] != input_size[1]
+        || state_size[2] != 2
+        || input_size[2] != 1
+    {
+        return Err(host_error(
+            "conv1d_step state/input shapes are incompatible",
+        ));
+    }
+    let groups = input_size[1];
+    let old0 = state.narrow(2, 0, 1);
+    let old1 = state.narrow(2, 1, 1);
+    let w0 = weight.select(2, 0).view([1, groups, 1]);
+    let w1 = weight.select(2, 1).view([1, groups, 1]);
+    let w2 = weight.select(2, 2).view([1, groups, 1]);
+    let output = old0 * w0 + old1.shallow_clone() * w1 + input.shallow_clone() * w2;
+    let next_state = Tensor::cat(&[&old1, &input], 2);
+    let local = context.insert_tensor(output);
+    let global = context.insert_tensor(next_state);
+    return_int(context.insert_pair(FfcPair { local, global }))
 }
 
 fn nn_conv2d(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {

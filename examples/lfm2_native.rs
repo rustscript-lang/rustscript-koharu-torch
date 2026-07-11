@@ -396,23 +396,24 @@ impl Lfm2Native {
         let c_part = projected.narrow(1, 1024, 1024);
         let x_part = projected.narrow(1, 2048, 1024);
         let bx = b_part * x_part;
-        let (conv_input, conv_start) = if incremental {
+        let weight = self.weight(&layer_name(layer, "conv.conv.weight"))?;
+        let conv_trimmed = if incremental {
             let old_state = self
                 .conv_cache
                 .get(&layer)
                 .with_context(|| format!("missing conv cache for layer {layer}"))?;
-            let start = old_state.size()[2];
-            (Tensor::cat(&[old_state, &bx], 2), start)
+            let groups = bx.size()[1];
+            let old0 = old_state.narrow(2, 0, 1);
+            let old1 = old_state.narrow(2, 1, 1);
+            let w0 = weight.select(2, 0).view([1, groups, 1]);
+            let w1 = weight.select(2, 1).view([1, groups, 1]);
+            let w2 = weight.select(2, 2).view([1, groups, 1]);
+            let output = old0 * w0 + old1.shallow_clone() * w1 + bx.shallow_clone() * w2;
+            self.conv_cache.insert(layer, Tensor::cat(&[&old1, &bx], 2));
+            output
         } else {
-            (bx, 0)
-        };
-        let weight = self.weight(&layer_name(layer, "conv.conv.weight"))?;
-        let conv_full = depthwise_conv1d(&conv_input, weight, 2);
-        let state = tail(&conv_input, 2, 2);
-        self.conv_cache.insert(layer, state);
-        let conv_trimmed = if incremental {
-            conv_full.narrow(-1, conv_start, 1)
-        } else {
+            let conv_full = depthwise_conv1d(&bx, weight, 2);
+            self.conv_cache.insert(layer, tail(&bx, 2, 2));
             conv_full.narrow(-1, 0, seq_len)
         };
         let mixed = (c_part * conv_trimmed).transpose(-1, -2).contiguous();

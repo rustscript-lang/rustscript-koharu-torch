@@ -1,34 +1,27 @@
 use torch;
-
 let weights_path: string = torch::runtime::arg(0);
 let tokenizer_path: string = torch::runtime::arg(1);
 let system_prompt: string = torch::runtime::arg(2);
 let source_text: string = torch::runtime::arg(3);
 let max_new_tokens: int = torch::runtime::arg_int(4);
 let ignore_eos: int = torch::runtime::arg_int_or(5, 0);
-
 torch::weights::load(weights_path);
 torch::tokenizer::load(tokenizer_path);
-
 fn weight(name: string) -> int {
     torch::weights::get(name)
 }
-
 fn linear(input: int, name: string) -> int {
     let w = weight(name);
     torch::nn::linear(input, w, 0)
 }
-
 fn rms_norm(input: int, weight_name: string) -> int {
     let scale_weight = weight(weight_name);
     torch::nn::rms_norm(input, scale_weight, 0.00001)
 }
-
 fn add_rms_norm(input: int, residual: int, weight_name: string) -> int {
     let scale_weight = weight(weight_name);
     torch::nn::add_rms_norm(input, residual, scale_weight, 0.00001)
 }
-
 fn rotate_half(input: int) -> int {
     let head_dim: int = torch::tensor::size(input, -1);
     let half = head_dim / 2;
@@ -37,44 +30,34 @@ fn rotate_half(input: int) -> int {
     let neg_second: int = torch::tensor::neg(second);
     torch::tensor::cat2(neg_second, first, -1)
 }
-
 fn apply_rope(input: int, cos: int, sin: int) -> int {
     torch::nn::apply_rope(input, cos, sin)
 }
-
 fn apply_rope_pair(query: int, key: int, cos: int, sin: int) -> int {
     torch::nn::apply_rope_pair(query, key, cos, sin)
 }
-
 fn repeat_kv(input: int) -> int {
     torch::tensor::repeat_interleave(input, 2, 1)
 }
-
 fn attention_mixer(input: int, prefix: string, incremental: bool, cos: int, sin: int) -> int {
     let batch: int = torch::tensor::size(input, 0);
     let seq_len: int = torch::tensor::size(input, 1);
     let hidden: int = rms_norm(input, prefix + ".operator_norm.weight");
-
     let qkv_linear: int = linear(hidden, prefix + ".self_attn.qkv_proj.weight");
     let q_linear: int = torch::tensor::narrow(qkv_linear, -1, 0, 1024);
     let k_linear: int = torch::tensor::narrow(qkv_linear, -1, 1024, 512);
     let v_linear: int = torch::tensor::narrow(qkv_linear, -1, 1536, 512);
-
     let q_view: int = torch::tensor::view4(q_linear, batch, seq_len, 16, 64);
     let k_view: int = torch::tensor::view4(k_linear, batch, seq_len, 8, 64);
     let v_view: int = torch::tensor::view4(v_linear, batch, seq_len, 8, 64);
-
     let q_norm: int = rms_norm(q_view, prefix + ".self_attn.q_layernorm.weight");
     let k_norm: int = rms_norm(k_view, prefix + ".self_attn.k_layernorm.weight");
-
     let q_heads: int = torch::tensor::transpose(q_norm, 1, 2);
     let k_heads: int = torch::tensor::transpose(k_norm, 1, 2);
     let v_heads: int = torch::tensor::transpose(v_view, 1, 2);
-
     let qk_rot: int = apply_rope_pair(q_heads, k_heads, cos, sin);
     let q_rot: int = torch::pair::local(qk_rot);
     let k_rot: int = torch::pair::global(qk_rot);
-
     let k_cache_name = prefix + ".self_attn.k_cache";
     let v_cache_name = prefix + ".self_attn.v_cache";
     let mut k_all: int = k_rot;
@@ -89,7 +72,6 @@ fn attention_mixer(input: int, prefix: string, incremental: bool, cos: int, sin:
     }
     torch::cache::set(k_cache_name, k_all);
     torch::cache::set(v_cache_name, v_all);
-
     let k_full: int = repeat_kv(k_all);
     let v_full: int = repeat_kv(v_all);
     let attended: int = torch::nn::scaled_dot_product_attention(
@@ -108,7 +90,6 @@ fn attention_mixer(input: int, prefix: string, incremental: bool, cos: int, sin:
     );
     linear(merged, prefix + ".self_attn.out_proj.weight")
 }
-
 fn conv_mixer(input: int, prefix: string, incremental: bool) -> int {
     let seq_len: int = torch::tensor::size(input, 1);
     let hidden: int = rms_norm(input, prefix + ".operator_norm.weight");
@@ -125,17 +106,9 @@ fn conv_mixer(input: int, prefix: string, incremental: bool) -> int {
     let conv_weight = weight(prefix + ".conv.conv.weight");
     let conv_trimmed: int = if incremental => {
         let old_state: int = torch::cache::get(state_name);
-        let old0: int = torch::tensor::narrow(old_state, 2, 0, 1);
-        let old1: int = torch::tensor::narrow(old_state, 2, 1, 1);
-        let w0: int = torch::tensor::view3(torch::tensor::select(conv_weight, 2, 0), 1, 1024, 1);
-        let w1: int = torch::tensor::view3(torch::tensor::select(conv_weight, 2, 1), 1, 1024, 1);
-        let w2: int = torch::tensor::view3(torch::tensor::select(conv_weight, 2, 2), 1, 1024, 1);
-        let part0: int = torch::tensor::mul(old0, w0);
-        let part1: int = torch::tensor::mul(old1, w1);
-        let part2: int = torch::tensor::mul(bx, w2);
-        let state: int = torch::tensor::cat2(old1, bx, 2);
-        torch::cache::set(state_name, state);
-        torch::tensor::add(torch::tensor::add(part0, part1), part2)
+        let step_result: int = torch::nn::conv1d_step(old_state, bx, conv_weight);
+        torch::cache::set(state_name, torch::pair::global(step_result));
+        torch::pair::local(step_result)
     } else => {
         let conv_full: int = torch::nn::conv1d(
             bx,
@@ -158,13 +131,11 @@ fn conv_mixer(input: int, prefix: string, incremental: bool) -> int {
     let mixed_contiguous: int = torch::tensor::contiguous(mixed);
     linear(mixed_contiguous, prefix + ".conv.out_proj.weight")
 }
-
 fn mlp(input: int, prefix: string) -> int {
     let gate_up: int = linear(input, prefix + ".w1_w3.weight");
     let down_weight = weight(prefix + ".w2.weight");
     torch::nn::swiglu_linear(gate_up, down_weight, 0)
 }
-
 fn finish_layer(input: int, prefix: string, mixed: int) -> int {
     let hidden_norm: int = add_rms_norm(input, mixed, prefix + ".ffn_norm.weight");
     let hidden: int = torch::pair::local(hidden_norm);
@@ -172,17 +143,14 @@ fn finish_layer(input: int, prefix: string, mixed: int) -> int {
     let feed_forward: int = mlp(ffn_input, prefix + ".feed_forward");
     torch::tensor::add(hidden, feed_forward)
 }
-
 fn conv_layer(input: int, prefix: string, incremental: bool) -> int {
     let mixed = conv_mixer(input, prefix, incremental);
     finish_layer(input, prefix, mixed)
 }
-
 fn attention_layer(input: int, prefix: string, incremental: bool, cos: int, sin: int) -> int {
     let mixed = attention_mixer(input, prefix, incremental, cos, sin);
     finish_layer(input, prefix, mixed)
 }
-
 fn model(input_ids: int, position: int, incremental: bool) -> int {
     let embed_weight = weight("model.embed_tokens.weight");
     let embeddings: int = torch::nn::embedding(input_ids, embed_weight);
@@ -206,14 +174,12 @@ fn model(input_ids: int, position: int, incremental: bool) -> int {
     hidden = conv_layer(hidden, "model.layers.13", incremental);
     hidden = attention_layer(hidden, "model.layers.14", incremental, cos, sin);
     hidden = conv_layer(hidden, "model.layers.15", incremental);
-
     let normalized: int = rms_norm(hidden, "model.embedding_norm.weight");
     let seq_len: int = torch::tensor::size(normalized, 1);
     let last_hidden: int = torch::tensor::select(normalized, 1, seq_len - 1);
     let lm_head: int = torch::weights::get_or("lm_head.weight", "model.embed_tokens.weight");
     torch::nn::linear(last_hidden, lm_head, 0)
 }
-
 let fused_mlp_0 = weight("model.layers.0.feed_forward.w1_w3.weight");
 let fused_mlp_1 = weight("model.layers.1.feed_forward.w1_w3.weight");
 let fused_qkv_2 = weight("model.layers.2.self_attn.qkv_proj.weight");
@@ -236,7 +202,6 @@ let fused_mlp_13 = weight("model.layers.13.feed_forward.w1_w3.weight");
 let fused_qkv_14 = weight("model.layers.14.self_attn.qkv_proj.weight");
 let fused_mlp_14 = weight("model.layers.14.feed_forward.w1_w3.weight");
 let fused_mlp_15 = weight("model.layers.15.feed_forward.w1_w3.weight");
-
 let prompt_tokens: int = torch::tokenizer::encode_chat(system_prompt, source_text);
 let prompt_len: int = torch::tensor::size(prompt_tokens, 1);
 let mut tokens: int = prompt_tokens;
@@ -286,7 +251,6 @@ if ignore_eos == 0 {
         }
     }
 }
-
 let output_text: string = if ignore_eos == 0 => {
     torch::tokenizer::decode_generated(tokens, prompt_len)
 } else => {
