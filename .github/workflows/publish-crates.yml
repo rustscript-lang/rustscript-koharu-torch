@@ -17,7 +17,7 @@ on:
         default: '0.22.5'
         type: string
       koharu_version:
-        description: 'koharu-runtime and koharu-torch dependency version'
+        description: 'Koharu dependency version'
         required: false
         default: '0.61.2'
         type: string
@@ -77,6 +77,7 @@ jobs:
           root = Path("..").resolve()
           flint_dir = Path.cwd().resolve()
           dependency_versions = {
+              "koharu-diffusion": os.environ["KOHARU_VERSION"],
               "koharu-runtime": os.environ["KOHARU_VERSION"],
               "koharu-torch": os.environ["KOHARU_VERSION"],
               "pd-host-function": os.environ["PD_VM_VERSION"],
