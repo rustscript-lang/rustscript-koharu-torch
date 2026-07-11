@@ -3,19 +3,22 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{ArgAction, Parser};
-use flint_ai::{LamaRustScript, TorchScriptRunner, preload_libtorch, resolve_device};
+use flint_ai::{LamaRustScript, ScriptRunner, TorchScriptRunner, preload_libtorch, resolve_device};
 use vm::compile_source;
 
 #[derive(Debug, Parser)]
 #[command(about = "Run Flint inference programs")]
 struct Cli {
-    #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["lama", "sd"])]
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["llama", "lama", "sd"])]
     llm: bool,
 
-    #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["llm", "sd"])]
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["llm", "lama", "sd"])]
+    llama: bool,
+
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["llm", "llama", "sd"])]
     lama: bool,
 
-    #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["llm", "lama"])]
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["llm", "llama", "lama"])]
     sd: bool,
 
     #[arg(long, value_name = "DEVICE")]
@@ -43,20 +46,27 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    preload_libtorch().await?;
-    let device = resolve_device(cli.device.as_deref())?;
-
-    match (cli.llm, cli.lama, cli.sd) {
-        (true, false, false) => run_script(device, cli.script, cli.args).await,
-        (false, true, false) => {
+    match (cli.llm, cli.llama, cli.lama, cli.sd) {
+        (true, false, false, false) => {
+            let device = torch_device(cli.device.as_deref()).await?;
+            run_torch_script(device, cli.script, cli.args).await
+        }
+        (false, true, false, false) => run_native_script(cli.script, cli.args),
+        (false, false, true, false) => {
+            let device = torch_device(cli.device.as_deref()).await?;
             run_lama(device, cli.weights, cli.image, cli.mask, cli.output).await
         }
-        (false, false, true) => run_script(device, cli.script, cli.args).await,
-        _ => bail!("choose one mode: --llm, --lama, or --sd"),
+        (false, false, false, true) => run_native_script(cli.script, cli.args),
+        _ => bail!("choose one mode: --llm, --llama, --lama, or --sd"),
     }
 }
 
-async fn run_script(
+async fn torch_device(value: Option<&str>) -> Result<koharu_torch::Device> {
+    preload_libtorch().await?;
+    resolve_device(value)
+}
+
+async fn run_torch_script(
     device: koharu_torch::Device,
     script: Option<PathBuf>,
     args: Vec<String>,
@@ -68,6 +78,20 @@ async fn run_script(
         .map_err(|err| anyhow!("failed to compile {}: {err}", script.display()))?;
     let runner = TorchScriptRunner::new(device).await?;
     let output = runner.run_text(Arc::new(compiled.program), args)?;
+    if !output.text.is_empty() {
+        println!("{}", output.text);
+    }
+    print_token_rates(&output);
+    Ok(())
+}
+
+fn run_native_script(script: Option<PathBuf>, args: Vec<String>) -> Result<()> {
+    let script = required_path(script, "--script")?;
+    let source = std::fs::read_to_string(&script)
+        .with_context(|| format!("failed to read {}", script.display()))?;
+    let compiled = compile_source(&source)
+        .map_err(|err| anyhow!("failed to compile {}: {err}", script.display()))?;
+    let output = ScriptRunner::new().run_text(Arc::new(compiled.program), args)?;
     if !output.text.is_empty() {
         println!("{}", output.text);
     }

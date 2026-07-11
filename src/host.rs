@@ -1,5 +1,7 @@
 mod cache;
 mod ggml;
+mod llama;
+mod native;
 mod pair;
 mod runtime;
 mod sd;
@@ -416,6 +418,22 @@ impl TorchHostRuntime {
         Ok(self.context.get().finish_text())
     }
 
+    fn run_text_plain(&self, program: Arc<Program>, args: Vec<String>) -> Result<ScriptTextOutput> {
+        let _execution = self
+            .execution
+            .lock()
+            .map_err(|_| anyhow!("Script execution lock is poisoned"))?;
+        self.context.get().begin_args(args);
+        let mut vm = Vm::new_shared_with_jit_config(program, torch_jit_config());
+        self.bind(&mut vm);
+        let _current_context = self.context.enter();
+        let status = vm.run().map_err(|err| anyhow!(err.to_string()))?;
+        if status != VmStatus::Halted {
+            bail!("RustScript did not halt: {status:?}");
+        }
+        Ok(self.context.get().finish_text())
+    }
+
     fn bind(&self, vm: &mut Vm) {
         for (name, op) in HOST_OPS {
             vm.bind_args_function(
@@ -442,6 +460,10 @@ pub struct TorchScriptRunner {
     runtime: TorchHostRuntime,
 }
 
+pub struct ScriptRunner {
+    runtime: TorchHostRuntime,
+}
+
 pub struct ScriptTextOutput {
     pub text: String,
     pub generated_tokens: Option<i64>,
@@ -462,6 +484,24 @@ impl TorchScriptRunner {
 
     pub fn run_text(&self, program: Arc<Program>, args: Vec<String>) -> Result<ScriptTextOutput> {
         self.runtime.run_text(program, args)
+    }
+}
+
+impl ScriptRunner {
+    pub fn new() -> Self {
+        Self {
+            runtime: TorchHostRuntime::new(Device::Cpu),
+        }
+    }
+
+    pub fn run_text(&self, program: Arc<Program>, args: Vec<String>) -> Result<ScriptTextOutput> {
+        self.runtime.run_text_plain(program, args)
+    }
+}
+
+impl Default for ScriptRunner {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -538,6 +578,198 @@ const HOST_OPS: &[(&str, HostOp)] = &[
     (
         "flint::ggml::list_stable_diffusion_devices",
         HostOp::Static(ggml::ggml_list_stable_diffusion_devices),
+    ),
+    (
+        "flint::llama::backend_init",
+        HostOp::Static(llama::llama_backend_init),
+    ),
+    (
+        "flint::llama::backend_supports_gpu_offload",
+        HostOp::Static(llama::llama_backend_supports_gpu_offload),
+    ),
+    (
+        "flint::llama::backend_list_devices",
+        HostOp::Static(llama::llama_backend_list_devices),
+    ),
+    (
+        "flint::llama::backend_free",
+        HostOp::Static(llama::llama_backend_free),
+    ),
+    (
+        "flint::llama::model_params_init",
+        HostOp::Static(llama::llama_model_params_init),
+    ),
+    (
+        "flint::llama::model_params_set_gpu_layers",
+        HostOp::Static(llama::llama_model_params_set_gpu_layers),
+    ),
+    (
+        "flint::llama::model_params_set_main_gpu",
+        HostOp::Static(llama::llama_model_params_set_main_gpu),
+    ),
+    (
+        "flint::llama::model_params_set_memory",
+        HostOp::Static(llama::llama_model_params_set_memory),
+    ),
+    (
+        "flint::llama::model_load",
+        HostOp::Static(llama::llama_model_load),
+    ),
+    (
+        "flint::llama::model_free",
+        HostOp::Static(llama::llama_model_free),
+    ),
+    (
+        "flint::llama::model_n_ctx_train",
+        HostOp::Static(llama::llama_model_n_ctx_train),
+    ),
+    (
+        "flint::llama::model_n_vocab",
+        HostOp::Static(llama::llama_model_n_vocab),
+    ),
+    (
+        "flint::llama::model_tokenize",
+        HostOp::Static(llama::llama_model_tokenize),
+    ),
+    (
+        "flint::llama::model_is_eog",
+        HostOp::Static(llama::llama_model_is_eog),
+    ),
+    (
+        "flint::llama::chat_template",
+        HostOp::Static(llama::llama_chat_template),
+    ),
+    (
+        "flint::llama::chat_messages_init",
+        HostOp::Static(llama::llama_chat_messages_init),
+    ),
+    (
+        "flint::llama::chat_messages_add",
+        HostOp::Static(llama::llama_chat_messages_add),
+    ),
+    (
+        "flint::llama::apply_chat_template",
+        HostOp::Static(llama::llama_apply_chat_template),
+    ),
+    (
+        "flint::llama::chat_free",
+        HostOp::Static(llama::llama_chat_free),
+    ),
+    (
+        "flint::llama::tokens_len",
+        HostOp::Static(llama::llama_tokens_len),
+    ),
+    (
+        "flint::llama::tokens_get",
+        HostOp::Static(llama::llama_tokens_get),
+    ),
+    (
+        "flint::llama::tokens_free",
+        HostOp::Static(llama::llama_tokens_free),
+    ),
+    (
+        "flint::llama::context_params_init",
+        HostOp::Static(llama::llama_context_params_init),
+    ),
+    (
+        "flint::llama::context_params_set_sizes",
+        HostOp::Static(llama::llama_context_params_set_sizes),
+    ),
+    (
+        "flint::llama::context_params_set_threads",
+        HostOp::Static(llama::llama_context_params_set_threads),
+    ),
+    (
+        "flint::llama::context_new",
+        HostOp::Static(llama::llama_context_new),
+    ),
+    (
+        "flint::llama::context_n_ctx",
+        HostOp::Static(llama::llama_context_n_ctx),
+    ),
+    (
+        "flint::llama::context_decode",
+        HostOp::Static(llama::llama_context_decode),
+    ),
+    (
+        "flint::llama::context_free",
+        HostOp::Static(llama::llama_context_free),
+    ),
+    (
+        "flint::llama::batch_init",
+        HostOp::Static(llama::llama_batch_init),
+    ),
+    (
+        "flint::llama::batch_add",
+        HostOp::Static(llama::llama_batch_add),
+    ),
+    (
+        "flint::llama::batch_add_sequence",
+        HostOp::Static(llama::llama_batch_add_sequence),
+    ),
+    (
+        "flint::llama::batch_clear",
+        HostOp::Static(llama::llama_batch_clear),
+    ),
+    (
+        "flint::llama::batch_free",
+        HostOp::Static(llama::llama_batch_free),
+    ),
+    (
+        "flint::llama::sampler_chain_init",
+        HostOp::Static(llama::llama_sampler_chain_init),
+    ),
+    (
+        "flint::llama::sampler_add_top_k",
+        HostOp::Static(llama::llama_sampler_add_top_k),
+    ),
+    (
+        "flint::llama::sampler_add_top_p",
+        HostOp::Static(llama::llama_sampler_add_top_p),
+    ),
+    (
+        "flint::llama::sampler_add_min_p",
+        HostOp::Static(llama::llama_sampler_add_min_p),
+    ),
+    (
+        "flint::llama::sampler_add_temp",
+        HostOp::Static(llama::llama_sampler_add_temp),
+    ),
+    (
+        "flint::llama::sampler_add_dist",
+        HostOp::Static(llama::llama_sampler_add_dist),
+    ),
+    (
+        "flint::llama::sampler_add_greedy",
+        HostOp::Static(llama::llama_sampler_add_greedy),
+    ),
+    (
+        "flint::llama::sampler_chain_build",
+        HostOp::Static(llama::llama_sampler_chain_build),
+    ),
+    (
+        "flint::llama::sampler_sample",
+        HostOp::Static(llama::llama_sampler_sample),
+    ),
+    (
+        "flint::llama::sampler_accept",
+        HostOp::Static(llama::llama_sampler_accept),
+    ),
+    (
+        "flint::llama::sampler_free",
+        HostOp::Static(llama::llama_sampler_free),
+    ),
+    (
+        "flint::llama::decoder_init",
+        HostOp::Static(llama::llama_decoder_init),
+    ),
+    (
+        "flint::llama::decoder_push",
+        HostOp::Static(llama::llama_decoder_push),
+    ),
+    (
+        "flint::llama::decoder_free",
+        HostOp::Static(llama::llama_decoder_free),
     ),
     (
         "flint::sd::ctx_params_init",

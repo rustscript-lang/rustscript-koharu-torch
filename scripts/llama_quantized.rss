@@ -1,0 +1,76 @@
+use flint;
+
+let model_path: string = flint::runtime::arg(0);
+let system_prompt: string = flint::runtime::arg_or(1, "You are a helpful assistant.");
+let user_prompt: string = flint::runtime::arg(2);
+let max_new_tokens: int = flint::runtime::arg_int_or(3, 128);
+let backend_name: string = flint::runtime::arg_or(4, "auto");
+let gpu_layers: int = flint::runtime::arg_int_or(5, 999);
+let n_ctx: int = flint::runtime::arg_int_or(6, 2048);
+let temperature: float = flint::runtime::arg_float_or(7, 0.7);
+let top_k: int = flint::runtime::arg_int_or(8, 40);
+let top_p: float = flint::runtime::arg_float_or(9, 0.95);
+let seed: int = flint::runtime::arg_int_or(10, 42);
+
+let backend: int = flint::llama::backend_init(backend_name);
+let model_params: int = flint::llama::model_params_init(backend);
+flint::llama::model_params_set_gpu_layers(model_params, gpu_layers);
+flint::llama::model_params_set_main_gpu(model_params, 0);
+flint::llama::model_params_set_memory(model_params, true, false);
+let model: int = flint::llama::model_load(backend, model_params, model_path);
+
+let template: int = flint::llama::chat_template(model, "");
+let messages: int = flint::llama::chat_messages_init();
+flint::llama::chat_messages_add(messages, "system", system_prompt);
+flint::llama::chat_messages_add(messages, "user", user_prompt);
+let prompt: string = flint::llama::apply_chat_template(model, template, messages, true);
+let tokens: int = flint::llama::model_tokenize(model, prompt, true);
+let prompt_len: int = flint::llama::tokens_len(tokens);
+
+let context_params: int = flint::llama::context_params_init(backend);
+flint::llama::context_params_set_sizes(context_params, n_ctx, n_ctx, 512);
+flint::llama::context_params_set_threads(context_params, 8, 8);
+let context: int = flint::llama::context_new(model, backend, context_params);
+let batch: int = flint::llama::batch_init(n_ctx, 1);
+flint::llama::batch_add_sequence(batch, tokens, 0, false);
+flint::llama::context_decode(context, batch);
+
+let sampler: int = flint::llama::sampler_chain_init(false);
+flint::llama::sampler_add_top_k(sampler, top_k);
+flint::llama::sampler_add_top_p(sampler, top_p, 1);
+flint::llama::sampler_add_temp(sampler, temperature);
+flint::llama::sampler_add_dist(sampler, seed);
+flint::llama::sampler_chain_build(sampler);
+
+let decoder: int = flint::llama::decoder_init();
+let mut output: string = "";
+let mut position: int = prompt_len;
+let mut generated: int = 0;
+flint::runtime::start_decode_timer();
+while generated < max_new_tokens {
+    let token: int = flint::llama::sampler_sample(sampler, context, -1);
+    if flint::llama::model_is_eog(model, token) {
+        break;
+    }
+    flint::llama::sampler_accept(sampler, token);
+    let piece: string = flint::llama::decoder_push(decoder, model, token, false);
+    output = output + piece;
+    flint::llama::batch_clear(batch);
+    flint::llama::batch_add(batch, token, position, 0, true);
+    flint::llama::context_decode(context, batch);
+    position = position + 1;
+    generated = generated + 1;
+}
+
+flint::runtime::set_decode_token_count(generated);
+flint::runtime::set_text_output(output);
+flint::llama::decoder_free(decoder);
+flint::llama::sampler_free(sampler);
+flint::llama::batch_free(batch);
+flint::llama::tokens_free(tokens);
+flint::llama::chat_free(messages);
+flint::llama::chat_free(template);
+flint::llama::context_free(context);
+flint::llama::model_free(model);
+flint::llama::backend_free(backend);
+output;

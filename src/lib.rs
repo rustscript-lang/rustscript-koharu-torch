@@ -13,7 +13,7 @@ pub(crate) use vm::{CallOutcome, Value, VmResult};
 use vm::{Program, compile_source};
 
 use crate::host::TorchHostRuntime;
-pub use crate::host::{ScriptTextOutput, TorchScriptRunner};
+pub use crate::host::{ScriptRunner, ScriptTextOutput, TorchScriptRunner};
 
 pub struct LamaRustScript {
     device: Device,

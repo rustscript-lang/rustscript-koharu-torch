@@ -35,6 +35,7 @@ The `flint` binary has explicit modes:
 
 ```text
 flint --llm --script scripts/lfm2.rss [--device cuda:0] <args...>
+flint --llama --script scripts/llama_quantized.rss <model.gguf> <system-prompt> <user-prompt> [max-tokens backend gpu-layers n-ctx temperature top-k top-p seed]
 flint --llm --script scripts/xlm_roberta_ner_japanese.rss <model.safetensors> <tokenizer.json> <text> [max-len label-csv]
 flint --llm --script scripts/flux_klein_encode_prompt.rss <qwen3.safetensors> <tokenizer.json> <prompt> <prompt.safetensors>
 flint --lama --weights model.safetensors --image input.png --mask mask.png --output output.png [--device cuda:0]
@@ -44,6 +45,18 @@ flint --sd --script scripts/ggml_devices.rss [backend]
 
 When `--device` is omitted, the CLI initializes LibTorch and selects `cuda:0`
 when CUDA is available. Passing `--device` overrides that selection.
+
+`--llama` runs native llama.cpp RSS programs without loading LibTorch. The
+`scripts/llama_quantized.rss` program loads GGUF quantized weights directly,
+builds the prompt with the model chat template, runs batched prompt decode,
+and performs the token generation loop in RustScript. Its `backend` argument
+accepts `auto`, `cpu`, `cuda`, `vulkan`, or a compatible llama.cpp runtime
+directory.
+
+At koharu commit `3a832b5`, the bundled llama.cpp `b9938` context layout is
+newer than the header used by `koharu-llama-sys`. Until those upstream pieces
+are aligned, pass a compatible runtime directory such as `b8665` as the
+`backend` argument.
 
 `scripts/flux_klein.rss` builds a FLUX.2 Klein text-to-image run from the
 low-level `flint::sd::*` API backed by `koharu-diffusion`. The native
@@ -141,6 +154,63 @@ or `vulkan*` also selects the matching packaged stable-diffusion.cpp runtime;
 arguments after `wtype`. Use `auto` to keep stable-diffusion.cpp defaults, or
 pass upstream names such as `euler`, `euler_a`, `dpm++2m`,
 `dpm++2m_sde`, `flux2`, `simple`, `karras`, or `beta`.
+
+### Llama
+
+`flint::llama::*` exposes the `koharu-llama` inference objects as independent
+handles. GGUF quantization is retained by llama.cpp during model loading and
+execution.
+
+```text
+flint::llama::backend_init
+flint::llama::backend_supports_gpu_offload
+flint::llama::backend_list_devices
+flint::llama::backend_free
+flint::llama::model_params_init
+flint::llama::model_params_set_gpu_layers
+flint::llama::model_params_set_main_gpu
+flint::llama::model_params_set_memory
+flint::llama::model_load
+flint::llama::model_free
+flint::llama::model_n_ctx_train
+flint::llama::model_n_vocab
+flint::llama::model_tokenize
+flint::llama::model_is_eog
+flint::llama::chat_template
+flint::llama::chat_messages_init
+flint::llama::chat_messages_add
+flint::llama::apply_chat_template
+flint::llama::chat_free
+flint::llama::tokens_len
+flint::llama::tokens_get
+flint::llama::tokens_free
+flint::llama::context_params_init
+flint::llama::context_params_set_sizes
+flint::llama::context_params_set_threads
+flint::llama::context_new
+flint::llama::context_n_ctx
+flint::llama::context_decode
+flint::llama::context_free
+flint::llama::batch_init
+flint::llama::batch_add
+flint::llama::batch_add_sequence
+flint::llama::batch_clear
+flint::llama::batch_free
+flint::llama::sampler_chain_init
+flint::llama::sampler_add_top_k
+flint::llama::sampler_add_top_p
+flint::llama::sampler_add_min_p
+flint::llama::sampler_add_temp
+flint::llama::sampler_add_dist
+flint::llama::sampler_add_greedy
+flint::llama::sampler_chain_build
+flint::llama::sampler_sample
+flint::llama::sampler_accept
+flint::llama::sampler_free
+flint::llama::decoder_init
+flint::llama::decoder_push
+flint::llama::decoder_free
+```
 
 ### Cache
 
