@@ -124,7 +124,7 @@ jobs:
 
       - name: Build release runner
         working-directory: flint
-        run: cargo build --release --locked --bin flint-ai
+        run: cargo build --release --locked --bin flint
 
       - name: Package runner
         id: package
@@ -143,7 +143,7 @@ jobs:
           if not cargo_target_dir.is_absolute():
               cargo_target_dir = root / cargo_target_dir
           release_dir = cargo_target_dir / "release"
-          package_name = f"flint-ai-{os.environ['PLATFORM']}"
+          package_name = f"flint-{os.environ['PLATFORM']}"
           package_dir = root / "dist" / package_name
           archive = root / "dist" / f"{package_name}.zip"
           exe_suffix = os.environ.get("EXE_SUFFIX", "")
@@ -152,7 +152,7 @@ jobs:
               shutil.rmtree(package_dir)
           package_dir.mkdir(parents=True, exist_ok=True)
 
-          binary = release_dir / f"flint-ai{exe_suffix}"
+          binary = release_dir / f"flint{exe_suffix}"
           if not binary.exists():
               raise FileNotFoundError(f"missing built runner binary: {binary}")
           shutil.copy2(binary, package_dir / binary.name)

@@ -1,6 +1,6 @@
 # Flint
 
-[![Crates.io](https://img.shields.io/crates/v/flint-ai.svg)](https://crates.io/crates/flint-ai)
+[![Crates.io](https://img.shields.io/crates/v/rs-flint.svg)](https://crates.io/crates/rs-flint)
 
 > Flint is all you need to light the Torch.
 
@@ -31,15 +31,15 @@ A typical integration follows this flow:
 
 ## CLI
 
-The `flint-ai` binary has explicit modes:
+The `flint` binary has explicit modes:
 
 ```text
-flint-ai --llm --script scripts/lfm2.rss [--device cuda:0] <args...>
-flint-ai --llm --script scripts/xlm_roberta_ner_japanese.rss <model.safetensors> <tokenizer.json> <text> [max-len label-csv]
-flint-ai --llm --script scripts/flux_klein_encode_prompt.rss <qwen3.safetensors> <tokenizer.json> <prompt> <prompt.safetensors>
-flint-ai --lama --weights model.safetensors --image input.png --mask mask.png --output output.png [--device cuda:0]
-flint-ai --sd --script scripts/flux_klein.rss <diffusion-model> <vae> <llm> <prompt> <output.png> [width height steps seed cfg backend params-backend max-vram wtype sample-method scheduler]
-flint-ai --sd --script scripts/ggml_devices.rss [backend]
+flint --llm --script scripts/lfm2.rss [--device cuda:0] <args...>
+flint --llm --script scripts/xlm_roberta_ner_japanese.rss <model.safetensors> <tokenizer.json> <text> [max-len label-csv]
+flint --llm --script scripts/flux_klein_encode_prompt.rss <qwen3.safetensors> <tokenizer.json> <prompt> <prompt.safetensors>
+flint --lama --weights model.safetensors --image input.png --mask mask.png --output output.png [--device cuda:0]
+flint --sd --script scripts/flux_klein.rss <diffusion-model> <vae> <llm> <prompt> <output.png> [width height steps seed cfg backend params-backend max-vram wtype sample-method scheduler]
+flint --sd --script scripts/ggml_devices.rss [backend]
 ```
 
 When `--device` is omitted, the CLI initializes LibTorch and selects `cuda:0`

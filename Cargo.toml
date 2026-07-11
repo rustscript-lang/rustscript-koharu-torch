@@ -1,12 +1,12 @@
 [package]
-name = "flint-ai"
+name = "rs-flint"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "Run koharu-torch inference graphs from RustScript host functions"
 
 [[bin]]
-name = "flint-ai"
+name = "flint"
 path = "src/bin/flint-ai.rs"
 
 [dependencies]

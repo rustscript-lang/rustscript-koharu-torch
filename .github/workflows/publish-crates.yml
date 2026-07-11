@@ -46,7 +46,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Publish flint-ai
+      - name: Publish rs-flint
         working-directory: flint
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -135,7 +135,7 @@ jobs:
           import urllib.error
           import urllib.request
 
-          crate = "flint-ai"
+          crate = "rs-flint"
           version = os.environ["PUBLISH_VERSION"]
           token = os.environ["CARGO_REGISTRY_TOKEN"]
 
