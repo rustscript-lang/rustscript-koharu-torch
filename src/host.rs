@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
+use image::imageops::FilterType;
 use koharu_torch::{Device, Kind, Tensor};
 use tokenizers::Tokenizer;
 use vm::{
@@ -31,13 +32,17 @@ struct BoundHost {
 impl HostArgsFunction for BoundHost {
     fn call(&mut self, args: &[Value]) -> VmResult<CallOutcome> {
         let context = self.context.get();
+        let previous_host_op = context.active_host_op.replace(self.name);
         if context.host_op_profile_enabled {
             let started = Instant::now();
             let outcome = self.op.call(context, args);
             context.record_host_op(self.name, started.elapsed());
+            context.active_host_op = previous_host_op;
             outcome
         } else {
-            self.op.call(context, args)
+            let outcome = self.op.call(context, args);
+            context.active_host_op = previous_host_op;
+            outcome
         }
     }
 }
@@ -150,6 +155,7 @@ struct TorchContext {
     rope_cache: HashMap<RopeCacheKey, Tensor>,
     conv1d_step_weights: HashMap<i64, Conv1dStepWeights>,
     tensors: HashMap<i64, Tensor>,
+    missing_weight_handles: HashMap<i64, String>,
     pairs: HashMap<i64, FfcPair>,
     inputs: Vec<i64>,
     args: Vec<String>,
@@ -162,7 +168,9 @@ struct TorchContext {
     generated_token_tensors: Vec<Tensor>,
     host_op_profile_enabled: bool,
     host_op_stats: HashMap<&'static str, HostOpStats>,
+    active_host_op: Option<&'static str>,
     next_tensor: i64,
+    next_missing_weight: i64,
     next_pair: i64,
 }
 
@@ -181,9 +189,15 @@ impl TorchContext {
     }
 
     fn tensor(&self, handle: i64) -> VmResult<&Tensor> {
+        if let Some(name) = self.missing_weight_handles.get(&handle) {
+            return Err(host_error(format!("missing optional weight '{name}'")));
+        }
         self.tensors
             .get(&handle)
-            .ok_or_else(|| host_error(format!("unknown tensor handle {handle}")))
+            .ok_or_else(|| match self.active_host_op {
+                Some(op) => host_error(format!("unknown tensor handle {handle} in {op}")),
+                None => host_error(format!("unknown tensor handle {handle}")),
+            })
     }
 
     fn weight(&self, name: &str) -> VmResult<&Tensor> {
@@ -215,6 +229,7 @@ impl TorchContext {
 
     fn begin_args(&mut self, args: Vec<String>) {
         self.tensors.clear();
+        self.missing_weight_handles.clear();
         self.pairs.clear();
         self.inputs.clear();
         self.cache.clear();
@@ -231,6 +246,7 @@ impl TorchContext {
         self.host_op_stats.clear();
         self.args = args;
         self.next_tensor = 1;
+        self.next_missing_weight = -1;
         self.next_pair = 1;
     }
 
@@ -266,6 +282,7 @@ impl TorchContext {
             .with_context(|| format!("RustScript returned unknown tensor handle {handle}"))?
             .shallow_clone();
         self.tensors.clear();
+        self.missing_weight_handles.clear();
         self.pairs.clear();
         self.inputs.clear();
         self.cache.clear();
@@ -293,6 +310,7 @@ impl TorchContext {
         let decode_elapsed = self.decode_started_at.take().map(|start| start.elapsed());
         let decode_tokens = self.decode_tokens.take();
         self.tensors.clear();
+        self.missing_weight_handles.clear();
         self.pairs.clear();
         self.inputs.clear();
         self.cache.clear();
@@ -332,6 +350,7 @@ impl TorchHostRuntime {
                 rope_cache: HashMap::new(),
                 conv1d_step_weights: HashMap::new(),
                 tensors: HashMap::new(),
+                missing_weight_handles: HashMap::new(),
                 pairs: HashMap::new(),
                 inputs: Vec::new(),
                 args: Vec::new(),
@@ -344,7 +363,9 @@ impl TorchHostRuntime {
                 generated_token_tensors: Vec::new(),
                 host_op_profile_enabled: std::env::var_os("KOHARU_TORCH_PROFILE_OPS").is_some(),
                 host_op_stats: HashMap::new(),
+                active_host_op: None,
                 next_tensor: 1,
+                next_missing_weight: -1,
                 next_pair: 1,
             })),
             execution: Mutex::new(()),
@@ -494,6 +515,10 @@ const HOST_OPS: &[(&str, HostOp)] = &[
         HostOp::Context(tokenizer_encode_chat),
     ),
     (
+        "flint::tokenizer::encode_vl_chat",
+        HostOp::Context(tokenizer_encode_vl_chat),
+    ),
+    (
         "flint::tokenizer::decode_generated",
         HostOp::Context(tokenizer_decode_generated),
     ),
@@ -528,6 +553,10 @@ const HOST_OPS: &[(&str, HostOp)] = &[
     ("flint::weights::load", HostOp::Context(weights_load)),
     ("flint::weights::get", HostOp::Context(weights_get)),
     ("flint::weights::get_or", HostOp::Context(weights_get_or)),
+    (
+        "flint::weights::get_optional",
+        HostOp::Context(weights_get_optional),
+    ),
     ("flint::pair::new", HostOp::Static(pair::pair_new)),
     ("flint::pair::local", HostOp::Static(pair::pair_local)),
     ("flint::pair::global", HostOp::Static(pair::pair_global)),
@@ -619,6 +648,7 @@ const HOST_OPS: &[(&str, HostOp)] = &[
     ("flint::tensor::relu", HostOp::Context(tensor_relu)),
     ("flint::tensor::sigmoid", HostOp::Context(tensor_sigmoid)),
     ("flint::tensor::silu", HostOp::Context(tensor_silu)),
+    ("flint::tensor::gelu", HostOp::Context(tensor_gelu)),
     ("flint::tensor::swiglu", HostOp::Context(tensor_swiglu)),
     (
         "flint::tensor::contiguous",
@@ -649,6 +679,7 @@ const HOST_OPS: &[(&str, HostOp)] = &[
     ),
     ("flint::nn::embedding", HostOp::Context(nn_embedding)),
     ("flint::nn::linear", HostOp::Context(nn_linear)),
+    ("flint::nn::layer_norm", HostOp::Context(nn_layer_norm)),
     (
         "flint::nn::swiglu_linear",
         HostOp::Context(nn_swiglu_linear),
@@ -672,6 +703,22 @@ const HOST_OPS: &[(&str, HostOp)] = &[
         HostOp::Context(nn_conv_transpose2d),
     ),
     ("flint::nn::batch_norm2d", HostOp::Context(nn_batch_norm2d)),
+    (
+        "flint::image::lfm2_vl_patches",
+        HostOp::Context(image_lfm2_vl_patches),
+    ),
+    (
+        "flint::vl::siglip2_position_embedding",
+        HostOp::Context(vl_siglip2_position_embedding),
+    ),
+    (
+        "flint::vl::pixel_unshuffle2",
+        HostOp::Context(vl_pixel_unshuffle2),
+    ),
+    (
+        "flint::vl::scatter_image_embeddings",
+        HostOp::Context(vl_scatter_image_embeddings),
+    ),
 ];
 
 fn host_error(message: impl Into<String>) -> VmError {
@@ -686,14 +733,14 @@ fn arg<'a>(args: &'a [Value], index: usize, label: &str) -> VmResult<&'a Value> 
 fn int_arg(args: &[Value], index: usize, label: &str) -> VmResult<i64> {
     match arg(args, index, label)? {
         Value::Int(value) => Ok(*value),
-        _ => Err(VmError::TypeMismatch("int")),
+        other => Err(host_arg_type_error(label, "int", other)),
     }
 }
 
 fn bool_arg(args: &[Value], index: usize, label: &str) -> VmResult<bool> {
     match arg(args, index, label)? {
         Value::Bool(value) => Ok(*value),
-        _ => Err(VmError::TypeMismatch("bool")),
+        other => Err(host_arg_type_error(label, "bool", other)),
     }
 }
 
@@ -701,14 +748,48 @@ fn float_arg(args: &[Value], index: usize, label: &str) -> VmResult<f64> {
     match arg(args, index, label)? {
         Value::Float(value) => Ok(*value),
         Value::Int(value) => Ok(*value as f64),
-        _ => Err(VmError::TypeMismatch("float")),
+        other => Err(host_arg_type_error(label, "float", other)),
     }
 }
 
 fn string_arg<'a>(args: &'a [Value], index: usize, label: &str) -> VmResult<&'a str> {
     match arg(args, index, label)? {
         Value::String(value) => Ok(value.as_str()),
-        _ => Err(VmError::TypeMismatch("string")),
+        other => Err(host_arg_type_error(label, "string", other)),
+    }
+}
+
+fn host_arg_type_error(label: &str, expected: &str, value: &Value) -> VmError {
+    let active = CURRENT_CONTEXT.with(|slot| {
+        let pointer = slot.get();
+        if pointer.is_null() {
+            None
+        } else {
+            unsafe { (*pointer).active_host_op }
+        }
+    });
+    match active {
+        Some(op) => host_error(format!(
+            "argument '{label}' in {op} must be {expected}, got {}",
+            value_kind(value)
+        )),
+        None => host_error(format!(
+            "argument '{label}' must be {expected}, got {}",
+            value_kind(value)
+        )),
+    }
+}
+
+fn value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Int(_) => "int",
+        Value::Float(_) => "float",
+        Value::Bool(_) => "bool",
+        Value::String(_) => "string",
+        Value::Bytes(_) => "bytes",
+        Value::Array(_) => "array",
+        Value::Map(_) => "map",
     }
 }
 
@@ -879,6 +960,24 @@ fn weights_get_or(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOu
     return_weight_tensor(context, name, tensor)
 }
 
+fn weights_get_optional(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let name = string_arg(args, 0, "name")?;
+    if let Some(handle) = cached_weight_handle(context, name) {
+        return return_int(handle);
+    }
+    match get_or_build_weight(context, name) {
+        Ok(tensor) => return_weight_tensor(context, name, tensor),
+        Err(_) => {
+            let handle = context.next_missing_weight;
+            context.next_missing_weight -= 1;
+            context
+                .missing_weight_handles
+                .insert(handle, name.to_owned());
+            return_int(handle)
+        }
+    }
+}
+
 fn get_or_build_weight(context: &mut TorchContext, name: &str) -> VmResult<Tensor> {
     if let Some(tensor) = context.weights.get(name) {
         return Ok(tensor.shallow_clone());
@@ -943,6 +1042,33 @@ fn tokenizer_encode_chat(context: &mut TorchContext, args: &[Value]) -> VmResult
     let len = i64::try_from(ids.len()).map_err(|_| host_error("token count out of range"))?;
     let tensor = Tensor::from_slice(&ids)
         .view([1, len])
+        .to_device(context.device);
+    return_tensor(context, tensor)
+}
+
+fn tokenizer_encode_vl_chat(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let system = string_arg(args, 0, "system")?;
+    let user = string_arg(args, 1, "user")?;
+    let image_tokens = usize::try_from(int_arg(args, 2, "image_tokens")?)
+        .map_err(|_| host_error("image_tokens must be non-negative"))?;
+    let image_tokens = "<image>".repeat(image_tokens);
+    let prompt = format!(
+        "<|startoftext|><|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n<|image_start|>{image_tokens}<|image_end|>{user}<|im_end|>\n<|im_start|>assistant\n"
+    );
+    let tokenizer = context
+        .tokenizer
+        .as_ref()
+        .ok_or_else(|| host_error("tokenizer has not been loaded"))?;
+    let encoding = tokenizer
+        .encode(prompt, false)
+        .map_err(|err| host_error(format!("tokenizer encode failed: {err}")))?;
+    let ids = encoding
+        .get_ids()
+        .iter()
+        .map(|id| i64::from(*id))
+        .collect::<Vec<_>>();
+    let tensor = Tensor::from_slice(&ids)
+        .view([1, ids.len() as i64])
         .to_device(context.device);
     return_tensor(context, tensor)
 }
@@ -1460,6 +1586,12 @@ fn tensor_silu(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutco
     unary_tensor(context, args, Tensor::silu)
 }
 
+fn tensor_gelu(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?;
+    let approximate = string_arg(args, 1, "approximate")?;
+    return_tensor(context, input.gelu(approximate))
+}
+
 fn tensor_swiglu(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
     let input = context.tensor(int_arg(args, 0, "tensor")?)?;
     let Some(&last_dim) = input.size().last() else {
@@ -1608,8 +1740,16 @@ fn nn_embedding(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutc
 }
 
 fn nn_linear(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
-    let input = context.tensor(int_arg(args, 0, "tensor")?)?.shallow_clone();
-    let weight = context.tensor(int_arg(args, 1, "weight")?)?.shallow_clone();
+    let input_handle = int_arg(args, 0, "tensor")?;
+    let weight_handle = int_arg(args, 1, "weight")?;
+    if input_handle == 0 {
+        return Err(host_error("linear input handle is 0"));
+    }
+    if weight_handle == 0 {
+        return Err(host_error("linear weight handle is 0"));
+    }
+    let input = context.tensor(input_handle)?.shallow_clone();
+    let weight = context.tensor(weight_handle)?.shallow_clone();
     let bias_handle = int_arg(args, 2, "bias")?;
     let bias = if bias_handle == 0 {
         None
@@ -1620,6 +1760,39 @@ fn nn_linear(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome
         Some(bias) => input.linear(&weight, Some(&bias)),
         None if linear_mv_enabled() => linear_or_mv(&input, &weight),
         None => input.linear(&weight, None::<&Tensor>),
+    };
+    return_tensor(context, output)
+}
+
+fn nn_layer_norm(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?.shallow_clone();
+    let weight_handle = int_arg(args, 1, "weight")?;
+    let bias_handle = int_arg(args, 2, "bias")?;
+    let eps = float_arg(args, 3, "eps")?;
+    let normalized_size = int_arg(args, 4, "normalized_size")?;
+    let weight = if weight_handle == 0 {
+        None
+    } else {
+        Some(context.tensor(weight_handle)?.shallow_clone())
+    };
+    let bias = if bias_handle == 0 {
+        None
+    } else {
+        Some(context.tensor(bias_handle)?.shallow_clone())
+    };
+    let output = match (weight.as_ref(), bias.as_ref()) {
+        (Some(weight), Some(bias)) => {
+            input.layer_norm([normalized_size], Some(weight), Some(bias), eps, false)
+        }
+        (Some(weight), None) => input.layer_norm([normalized_size], Some(weight), None, eps, false),
+        (None, Some(bias)) => input.layer_norm([normalized_size], None, Some(bias), eps, false),
+        (None, None) => input.layer_norm(
+            [normalized_size],
+            None::<&Tensor>,
+            None::<&Tensor>,
+            eps,
+            false,
+        ),
     };
     return_tensor(context, output)
 }
@@ -1957,5 +2130,132 @@ fn nn_batch_norm2d(context: &mut TorchContext, args: &[Value]) -> VmResult<CallO
             true,
         )
         .map_err(|err| host_error(format!("batch_norm2d '{prefix}': {err}")))?;
+    return_tensor(context, output)
+}
+
+fn image_lfm2_vl_patches(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let path = PathBuf::from(string_arg(args, 0, "path")?);
+    let image = image::open(&path)
+        .map_err(|err| host_error(format!("failed to read image {}: {err}", path.display())))?
+        .resize_exact(512, 512, FilterType::Triangle)
+        .to_rgb8();
+    let raw = image.as_raw();
+    let patch = 16usize;
+    let grid = 32usize;
+    let mut data = Vec::with_capacity(grid * grid * 3 * patch * patch);
+    for patch_y in 0..grid {
+        for patch_x in 0..grid {
+            for y in 0..patch {
+                for x in 0..patch {
+                    for channel in 0..3usize {
+                        let image_x = patch_x * patch + x;
+                        let image_y = patch_y * patch + y;
+                        let offset = (image_y * 512 + image_x) * 3 + channel;
+                        let value = raw[offset] as f32 / 255.0;
+                        data.push((value - 0.5) / 0.5);
+                    }
+                }
+            }
+        }
+    }
+    let output = Tensor::from_slice(&data)
+        .view([1, 1024, 768])
+        .to_device(context.device)
+        .to_kind(
+            requested_weight_kind()
+                .ok()
+                .flatten()
+                .unwrap_or(Kind::Float),
+        );
+    return_tensor(context, output)
+}
+
+fn vl_siglip2_position_embedding(
+    context: &mut TorchContext,
+    args: &[Value],
+) -> VmResult<CallOutcome> {
+    let weight = context.tensor(int_arg(args, 0, "weight")?)?.shallow_clone();
+    let height = int_arg(args, 1, "height")?;
+    let width = int_arg(args, 2, "width")?;
+    let max_len = int_arg(args, 3, "max_len")?;
+    let size = weight.size();
+    if size.len() != 2 {
+        return Err(host_error(
+            "position embedding weight must be [tokens, dim]",
+        ));
+    }
+    let source = (size[0] as f64).sqrt() as i64;
+    if source * source != size[0] {
+        return Err(host_error("position embedding token count must be square"));
+    }
+    let embed_dim = size[1];
+    if height <= 0 || width <= 0 || max_len < height * width {
+        return Err(host_error("invalid position embedding target shape"));
+    }
+    let resized = weight
+        .view([source, source, embed_dim])
+        .permute([2, 0, 1])
+        .unsqueeze(0)
+        .to_kind(Kind::Float)
+        .upsample_bilinear2d([height, width], false, None::<f64>, None::<f64>)
+        .to_kind(weight.kind())
+        .view([embed_dim, height * width])
+        .transpose(0, 1);
+    let output = if height * width == max_len {
+        resized
+    } else {
+        let pad = resized
+            .select(0, 0)
+            .view([1, embed_dim])
+            .repeat([max_len - height * width, 1]);
+        Tensor::cat(&[&resized, &pad], 0)
+    }
+    .view([1, max_len, embed_dim]);
+    return_tensor(context, output)
+}
+
+fn vl_pixel_unshuffle2(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?.shallow_clone();
+    let size = input.size();
+    if size.len() != 4 || size[1] % 2 != 0 || size[2] % 2 != 0 {
+        return Err(host_error(
+            "pixel_unshuffle2 expects [N,H,W,C] with even H/W",
+        ));
+    }
+    let n = size[0];
+    let h = size[1];
+    let w = size[2];
+    let c = size[3];
+    let output = input
+        .contiguous()
+        .view([n, h, w / 2, c * 2])
+        .permute([0, 2, 1, 3])
+        .contiguous()
+        .view([n, w / 2, h / 2, c * 4])
+        .permute([0, 2, 1, 3])
+        .contiguous();
+    return_tensor(context, output)
+}
+
+fn vl_scatter_image_embeddings(
+    context: &mut TorchContext,
+    args: &[Value],
+) -> VmResult<CallOutcome> {
+    let input_ids = context
+        .tensor(int_arg(args, 0, "input_ids")?)?
+        .shallow_clone();
+    let inputs_embeds = context
+        .tensor(int_arg(args, 1, "inputs_embeds")?)?
+        .shallow_clone();
+    let image_features = context
+        .tensor(int_arg(args, 2, "image_features")?)?
+        .shallow_clone()
+        .to_kind(inputs_embeds.kind());
+    let image_token_id = int_arg(args, 3, "image_token_id")?;
+    let mask = input_ids
+        .eq(image_token_id)
+        .unsqueeze(-1)
+        .expand_as(&inputs_embeds);
+    let output = inputs_embeds.masked_scatter(&mask, &image_features);
     return_tensor(context, output)
 }

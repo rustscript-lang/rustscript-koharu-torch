@@ -1,0 +1,859 @@
+use flint;
+
+let weights_path: string = flint::runtime::arg(0);
+let tokenizer_path: string = flint::runtime::arg(1);
+let system_prompt: string = flint::runtime::arg(2);
+let source_text: string = flint::runtime::arg(3);
+let max_new_tokens: int = flint::runtime::arg_int(4);
+let ignore_eos: int = flint::runtime::arg_int_or(5, 0);
+let model_kind: int = flint::runtime::arg_int_or(6, 0);
+
+flint::weights::load(weights_path);
+flint::tokenizer::load(tokenizer_path);
+
+fn is_vl_model() -> bool {
+    let kind: int = flint::runtime::arg_int_or(6, 0);
+    kind == 1
+}
+
+fn model_prefix() -> string {
+    if is_vl_model() => {
+        "model.language_model"
+    } else => {
+        "model"
+    }
+}
+
+fn text_key(name: string) -> string {
+    model_prefix() + "." + name
+}
+
+fn text_weight(name: string) -> int {
+    let handle: int = flint::weights::get(text_key(name));
+    handle
+}
+
+fn text_optional_weight(name: string) -> int {
+    let handle: int = flint::weights::get_optional(text_key(name));
+    handle
+}
+
+fn vl_weight(name: string) -> int {
+    let handle: int = flint::weights::get_optional("model." + name);
+    handle
+}
+
+fn linear(input: int, weight_handle: int) -> int {
+    flint::nn::linear(input, weight_handle, 0)
+}
+
+fn linear_bias(input: int, weight_handle: int, bias_handle: int) -> int {
+    flint::nn::linear(input, weight_handle, bias_handle)
+}
+
+fn rms_norm(input: int, weight_handle: int) -> int {
+    flint::nn::rms_norm(input, weight_handle, 0.00001)
+}
+
+fn add_rms_norm(input: int, residual: int, weight_handle: int) -> int {
+    flint::nn::add_rms_norm(input, residual, weight_handle, 0.00001)
+}
+
+fn layer_norm(input: int, weight_handle: int, bias_handle: int, hidden_size: int) -> int {
+    flint::nn::layer_norm(input, weight_handle, bias_handle, 0.000001, hidden_size)
+}
+
+fn apply_rope_pair(query: int, key: int, cos: int, sin: int) -> int {
+    flint::nn::apply_rope_pair(query, key, cos, sin)
+}
+
+fn repeat_kv(input: int) -> int {
+    flint::tensor::repeat_interleave(input, 2, 1)
+}
+
+let embed_weight: int = text_weight("embed_tokens.weight");
+let embedding_norm_weight: int = text_weight("embedding_norm.weight");
+let lm_head_weight: int = embed_weight;
+
+fn token_embeddings(input_ids: int) -> int {
+    let weight: int = text_weight("embed_tokens.weight");
+    flint::nn::embedding(input_ids, weight)
+}
+
+fn final_norm(input: int) -> int {
+    let weight: int = text_weight("embedding_norm.weight");
+    rms_norm(input, weight)
+}
+
+fn lm_head(input: int) -> int {
+    let weight: int = text_weight("embed_tokens.weight");
+    flint::nn::linear(input, weight, 0)
+}
+
+let operator_norm_weights: [int] = [
+    text_optional_weight("layers.0.operator_norm.weight"),
+    text_optional_weight("layers.1.operator_norm.weight"),
+    text_optional_weight("layers.2.operator_norm.weight"),
+    text_optional_weight("layers.3.operator_norm.weight"),
+    text_optional_weight("layers.4.operator_norm.weight"),
+    text_optional_weight("layers.5.operator_norm.weight"),
+    text_optional_weight("layers.6.operator_norm.weight"),
+    text_optional_weight("layers.7.operator_norm.weight"),
+    text_optional_weight("layers.8.operator_norm.weight"),
+    text_optional_weight("layers.9.operator_norm.weight"),
+    text_optional_weight("layers.10.operator_norm.weight"),
+    text_optional_weight("layers.11.operator_norm.weight"),
+    text_optional_weight("layers.12.operator_norm.weight"),
+    text_optional_weight("layers.13.operator_norm.weight"),
+    text_optional_weight("layers.14.operator_norm.weight"),
+    text_optional_weight("layers.15.operator_norm.weight")
+];
+let ffn_norm_weights: [int] = [
+    text_optional_weight("layers.0.ffn_norm.weight"),
+    text_optional_weight("layers.1.ffn_norm.weight"),
+    text_optional_weight("layers.2.ffn_norm.weight"),
+    text_optional_weight("layers.3.ffn_norm.weight"),
+    text_optional_weight("layers.4.ffn_norm.weight"),
+    text_optional_weight("layers.5.ffn_norm.weight"),
+    text_optional_weight("layers.6.ffn_norm.weight"),
+    text_optional_weight("layers.7.ffn_norm.weight"),
+    text_optional_weight("layers.8.ffn_norm.weight"),
+    text_optional_weight("layers.9.ffn_norm.weight"),
+    text_optional_weight("layers.10.ffn_norm.weight"),
+    text_optional_weight("layers.11.ffn_norm.weight"),
+    text_optional_weight("layers.12.ffn_norm.weight"),
+    text_optional_weight("layers.13.ffn_norm.weight"),
+    text_optional_weight("layers.14.ffn_norm.weight"),
+    text_optional_weight("layers.15.ffn_norm.weight")
+];
+let mlp_gate_up_weights: [int] = [
+    text_optional_weight("layers.0.feed_forward.w1_w3.weight"),
+    text_optional_weight("layers.1.feed_forward.w1_w3.weight"),
+    text_optional_weight("layers.2.feed_forward.w1_w3.weight"),
+    text_optional_weight("layers.3.feed_forward.w1_w3.weight"),
+    text_optional_weight("layers.4.feed_forward.w1_w3.weight"),
+    text_optional_weight("layers.5.feed_forward.w1_w3.weight"),
+    text_optional_weight("layers.6.feed_forward.w1_w3.weight"),
+    text_optional_weight("layers.7.feed_forward.w1_w3.weight"),
+    text_optional_weight("layers.8.feed_forward.w1_w3.weight"),
+    text_optional_weight("layers.9.feed_forward.w1_w3.weight"),
+    text_optional_weight("layers.10.feed_forward.w1_w3.weight"),
+    text_optional_weight("layers.11.feed_forward.w1_w3.weight"),
+    text_optional_weight("layers.12.feed_forward.w1_w3.weight"),
+    text_optional_weight("layers.13.feed_forward.w1_w3.weight"),
+    text_optional_weight("layers.14.feed_forward.w1_w3.weight"),
+    text_optional_weight("layers.15.feed_forward.w1_w3.weight")
+];
+let mlp_down_weights: [int] = [
+    text_optional_weight("layers.0.feed_forward.w2.weight"),
+    text_optional_weight("layers.1.feed_forward.w2.weight"),
+    text_optional_weight("layers.2.feed_forward.w2.weight"),
+    text_optional_weight("layers.3.feed_forward.w2.weight"),
+    text_optional_weight("layers.4.feed_forward.w2.weight"),
+    text_optional_weight("layers.5.feed_forward.w2.weight"),
+    text_optional_weight("layers.6.feed_forward.w2.weight"),
+    text_optional_weight("layers.7.feed_forward.w2.weight"),
+    text_optional_weight("layers.8.feed_forward.w2.weight"),
+    text_optional_weight("layers.9.feed_forward.w2.weight"),
+    text_optional_weight("layers.10.feed_forward.w2.weight"),
+    text_optional_weight("layers.11.feed_forward.w2.weight"),
+    text_optional_weight("layers.12.feed_forward.w2.weight"),
+    text_optional_weight("layers.13.feed_forward.w2.weight"),
+    text_optional_weight("layers.14.feed_forward.w2.weight"),
+    text_optional_weight("layers.15.feed_forward.w2.weight")
+];
+let conv_in_weights: [int] = [
+    text_optional_weight("layers.0.conv.in_proj.weight"),
+    text_optional_weight("layers.1.conv.in_proj.weight"),
+    text_optional_weight("layers.2.conv.in_proj.weight"),
+    text_optional_weight("layers.3.conv.in_proj.weight"),
+    text_optional_weight("layers.4.conv.in_proj.weight"),
+    text_optional_weight("layers.5.conv.in_proj.weight"),
+    text_optional_weight("layers.6.conv.in_proj.weight"),
+    text_optional_weight("layers.7.conv.in_proj.weight"),
+    text_optional_weight("layers.8.conv.in_proj.weight"),
+    text_optional_weight("layers.9.conv.in_proj.weight"),
+    text_optional_weight("layers.10.conv.in_proj.weight"),
+    text_optional_weight("layers.11.conv.in_proj.weight"),
+    text_optional_weight("layers.12.conv.in_proj.weight"),
+    text_optional_weight("layers.13.conv.in_proj.weight"),
+    text_optional_weight("layers.14.conv.in_proj.weight"),
+    text_optional_weight("layers.15.conv.in_proj.weight")
+];
+let conv_weights: [int] = [
+    text_optional_weight("layers.0.conv.conv.weight"),
+    text_optional_weight("layers.1.conv.conv.weight"),
+    text_optional_weight("layers.2.conv.conv.weight"),
+    text_optional_weight("layers.3.conv.conv.weight"),
+    text_optional_weight("layers.4.conv.conv.weight"),
+    text_optional_weight("layers.5.conv.conv.weight"),
+    text_optional_weight("layers.6.conv.conv.weight"),
+    text_optional_weight("layers.7.conv.conv.weight"),
+    text_optional_weight("layers.8.conv.conv.weight"),
+    text_optional_weight("layers.9.conv.conv.weight"),
+    text_optional_weight("layers.10.conv.conv.weight"),
+    text_optional_weight("layers.11.conv.conv.weight"),
+    text_optional_weight("layers.12.conv.conv.weight"),
+    text_optional_weight("layers.13.conv.conv.weight"),
+    text_optional_weight("layers.14.conv.conv.weight"),
+    text_optional_weight("layers.15.conv.conv.weight")
+];
+let conv_out_weights: [int] = [
+    text_optional_weight("layers.0.conv.out_proj.weight"),
+    text_optional_weight("layers.1.conv.out_proj.weight"),
+    text_optional_weight("layers.2.conv.out_proj.weight"),
+    text_optional_weight("layers.3.conv.out_proj.weight"),
+    text_optional_weight("layers.4.conv.out_proj.weight"),
+    text_optional_weight("layers.5.conv.out_proj.weight"),
+    text_optional_weight("layers.6.conv.out_proj.weight"),
+    text_optional_weight("layers.7.conv.out_proj.weight"),
+    text_optional_weight("layers.8.conv.out_proj.weight"),
+    text_optional_weight("layers.9.conv.out_proj.weight"),
+    text_optional_weight("layers.10.conv.out_proj.weight"),
+    text_optional_weight("layers.11.conv.out_proj.weight"),
+    text_optional_weight("layers.12.conv.out_proj.weight"),
+    text_optional_weight("layers.13.conv.out_proj.weight"),
+    text_optional_weight("layers.14.conv.out_proj.weight"),
+    text_optional_weight("layers.15.conv.out_proj.weight")
+];
+let qkv_weights: [int] = [
+    text_optional_weight("layers.0.self_attn.qkv_proj.weight"),
+    text_optional_weight("layers.1.self_attn.qkv_proj.weight"),
+    text_optional_weight("layers.2.self_attn.qkv_proj.weight"),
+    text_optional_weight("layers.3.self_attn.qkv_proj.weight"),
+    text_optional_weight("layers.4.self_attn.qkv_proj.weight"),
+    text_optional_weight("layers.5.self_attn.qkv_proj.weight"),
+    text_optional_weight("layers.6.self_attn.qkv_proj.weight"),
+    text_optional_weight("layers.7.self_attn.qkv_proj.weight"),
+    text_optional_weight("layers.8.self_attn.qkv_proj.weight"),
+    text_optional_weight("layers.9.self_attn.qkv_proj.weight"),
+    text_optional_weight("layers.10.self_attn.qkv_proj.weight"),
+    text_optional_weight("layers.11.self_attn.qkv_proj.weight"),
+    text_optional_weight("layers.12.self_attn.qkv_proj.weight"),
+    text_optional_weight("layers.13.self_attn.qkv_proj.weight"),
+    text_optional_weight("layers.14.self_attn.qkv_proj.weight"),
+    text_optional_weight("layers.15.self_attn.qkv_proj.weight")
+];
+let q_norm_weights: [int] = [
+    text_optional_weight("layers.0.self_attn.q_layernorm.weight"),
+    text_optional_weight("layers.1.self_attn.q_layernorm.weight"),
+    text_optional_weight("layers.2.self_attn.q_layernorm.weight"),
+    text_optional_weight("layers.3.self_attn.q_layernorm.weight"),
+    text_optional_weight("layers.4.self_attn.q_layernorm.weight"),
+    text_optional_weight("layers.5.self_attn.q_layernorm.weight"),
+    text_optional_weight("layers.6.self_attn.q_layernorm.weight"),
+    text_optional_weight("layers.7.self_attn.q_layernorm.weight"),
+    text_optional_weight("layers.8.self_attn.q_layernorm.weight"),
+    text_optional_weight("layers.9.self_attn.q_layernorm.weight"),
+    text_optional_weight("layers.10.self_attn.q_layernorm.weight"),
+    text_optional_weight("layers.11.self_attn.q_layernorm.weight"),
+    text_optional_weight("layers.12.self_attn.q_layernorm.weight"),
+    text_optional_weight("layers.13.self_attn.q_layernorm.weight"),
+    text_optional_weight("layers.14.self_attn.q_layernorm.weight"),
+    text_optional_weight("layers.15.self_attn.q_layernorm.weight")
+];
+let k_norm_weights: [int] = [
+    text_optional_weight("layers.0.self_attn.k_layernorm.weight"),
+    text_optional_weight("layers.1.self_attn.k_layernorm.weight"),
+    text_optional_weight("layers.2.self_attn.k_layernorm.weight"),
+    text_optional_weight("layers.3.self_attn.k_layernorm.weight"),
+    text_optional_weight("layers.4.self_attn.k_layernorm.weight"),
+    text_optional_weight("layers.5.self_attn.k_layernorm.weight"),
+    text_optional_weight("layers.6.self_attn.k_layernorm.weight"),
+    text_optional_weight("layers.7.self_attn.k_layernorm.weight"),
+    text_optional_weight("layers.8.self_attn.k_layernorm.weight"),
+    text_optional_weight("layers.9.self_attn.k_layernorm.weight"),
+    text_optional_weight("layers.10.self_attn.k_layernorm.weight"),
+    text_optional_weight("layers.11.self_attn.k_layernorm.weight"),
+    text_optional_weight("layers.12.self_attn.k_layernorm.weight"),
+    text_optional_weight("layers.13.self_attn.k_layernorm.weight"),
+    text_optional_weight("layers.14.self_attn.k_layernorm.weight"),
+    text_optional_weight("layers.15.self_attn.k_layernorm.weight")
+];
+let attention_out_weights: [int] = [
+    text_optional_weight("layers.0.self_attn.out_proj.weight"),
+    text_optional_weight("layers.1.self_attn.out_proj.weight"),
+    text_optional_weight("layers.2.self_attn.out_proj.weight"),
+    text_optional_weight("layers.3.self_attn.out_proj.weight"),
+    text_optional_weight("layers.4.self_attn.out_proj.weight"),
+    text_optional_weight("layers.5.self_attn.out_proj.weight"),
+    text_optional_weight("layers.6.self_attn.out_proj.weight"),
+    text_optional_weight("layers.7.self_attn.out_proj.weight"),
+    text_optional_weight("layers.8.self_attn.out_proj.weight"),
+    text_optional_weight("layers.9.self_attn.out_proj.weight"),
+    text_optional_weight("layers.10.self_attn.out_proj.weight"),
+    text_optional_weight("layers.11.self_attn.out_proj.weight"),
+    text_optional_weight("layers.12.self_attn.out_proj.weight"),
+    text_optional_weight("layers.13.self_attn.out_proj.weight"),
+    text_optional_weight("layers.14.self_attn.out_proj.weight"),
+    text_optional_weight("layers.15.self_attn.out_proj.weight")
+];
+
+let vl_patch_weight: int = vl_weight("vision_tower.vision_model.embeddings.patch_embedding.weight");
+let vl_patch_bias: int = vl_weight("vision_tower.vision_model.embeddings.patch_embedding.bias");
+let vl_position_weight: int = vl_weight("vision_tower.vision_model.embeddings.position_embedding.weight");
+let vl_post_ln_weight: int = vl_weight("vision_tower.vision_model.post_layernorm.weight");
+let vl_post_ln_bias: int = vl_weight("vision_tower.vision_model.post_layernorm.bias");
+let vl_projector_1_weight: int = vl_weight("multi_modal_projector.linear_1.weight");
+let vl_projector_1_bias: int = vl_weight("multi_modal_projector.linear_1.bias");
+let vl_projector_2_weight: int = vl_weight("multi_modal_projector.linear_2.weight");
+let vl_projector_2_bias: int = vl_weight("multi_modal_projector.linear_2.bias");
+
+let vl_ln1_weights: [int] = [
+    vl_weight("vision_tower.vision_model.encoder.layers.0.layer_norm1.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.1.layer_norm1.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.2.layer_norm1.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.3.layer_norm1.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.4.layer_norm1.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.5.layer_norm1.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.6.layer_norm1.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.7.layer_norm1.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.8.layer_norm1.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.9.layer_norm1.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.10.layer_norm1.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.11.layer_norm1.weight")
+];
+let vl_ln1_biases: [int] = [
+    vl_weight("vision_tower.vision_model.encoder.layers.0.layer_norm1.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.1.layer_norm1.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.2.layer_norm1.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.3.layer_norm1.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.4.layer_norm1.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.5.layer_norm1.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.6.layer_norm1.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.7.layer_norm1.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.8.layer_norm1.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.9.layer_norm1.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.10.layer_norm1.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.11.layer_norm1.bias")
+];
+let vl_ln2_weights: [int] = [
+    vl_weight("vision_tower.vision_model.encoder.layers.0.layer_norm2.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.1.layer_norm2.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.2.layer_norm2.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.3.layer_norm2.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.4.layer_norm2.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.5.layer_norm2.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.6.layer_norm2.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.7.layer_norm2.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.8.layer_norm2.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.9.layer_norm2.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.10.layer_norm2.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.11.layer_norm2.weight")
+];
+let vl_ln2_biases: [int] = [
+    vl_weight("vision_tower.vision_model.encoder.layers.0.layer_norm2.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.1.layer_norm2.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.2.layer_norm2.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.3.layer_norm2.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.4.layer_norm2.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.5.layer_norm2.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.6.layer_norm2.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.7.layer_norm2.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.8.layer_norm2.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.9.layer_norm2.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.10.layer_norm2.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.11.layer_norm2.bias")
+];
+let vl_q_weights: [int] = [
+    vl_weight("vision_tower.vision_model.encoder.layers.0.self_attn.q_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.1.self_attn.q_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.2.self_attn.q_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.3.self_attn.q_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.4.self_attn.q_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.5.self_attn.q_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.6.self_attn.q_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.7.self_attn.q_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.8.self_attn.q_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.9.self_attn.q_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.10.self_attn.q_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.11.self_attn.q_proj.weight")
+];
+let vl_q_biases: [int] = [
+    vl_weight("vision_tower.vision_model.encoder.layers.0.self_attn.q_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.1.self_attn.q_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.2.self_attn.q_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.3.self_attn.q_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.4.self_attn.q_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.5.self_attn.q_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.6.self_attn.q_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.7.self_attn.q_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.8.self_attn.q_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.9.self_attn.q_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.10.self_attn.q_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.11.self_attn.q_proj.bias")
+];
+let vl_k_weights: [int] = [
+    vl_weight("vision_tower.vision_model.encoder.layers.0.self_attn.k_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.1.self_attn.k_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.2.self_attn.k_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.3.self_attn.k_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.4.self_attn.k_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.5.self_attn.k_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.6.self_attn.k_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.7.self_attn.k_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.8.self_attn.k_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.9.self_attn.k_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.10.self_attn.k_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.11.self_attn.k_proj.weight")
+];
+let vl_k_biases: [int] = [
+    vl_weight("vision_tower.vision_model.encoder.layers.0.self_attn.k_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.1.self_attn.k_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.2.self_attn.k_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.3.self_attn.k_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.4.self_attn.k_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.5.self_attn.k_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.6.self_attn.k_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.7.self_attn.k_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.8.self_attn.k_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.9.self_attn.k_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.10.self_attn.k_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.11.self_attn.k_proj.bias")
+];
+let vl_v_weights: [int] = [
+    vl_weight("vision_tower.vision_model.encoder.layers.0.self_attn.v_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.1.self_attn.v_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.2.self_attn.v_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.3.self_attn.v_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.4.self_attn.v_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.5.self_attn.v_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.6.self_attn.v_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.7.self_attn.v_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.8.self_attn.v_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.9.self_attn.v_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.10.self_attn.v_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.11.self_attn.v_proj.weight")
+];
+let vl_v_biases: [int] = [
+    vl_weight("vision_tower.vision_model.encoder.layers.0.self_attn.v_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.1.self_attn.v_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.2.self_attn.v_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.3.self_attn.v_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.4.self_attn.v_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.5.self_attn.v_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.6.self_attn.v_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.7.self_attn.v_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.8.self_attn.v_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.9.self_attn.v_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.10.self_attn.v_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.11.self_attn.v_proj.bias")
+];
+let vl_attn_out_weights: [int] = [
+    vl_weight("vision_tower.vision_model.encoder.layers.0.self_attn.out_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.1.self_attn.out_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.2.self_attn.out_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.3.self_attn.out_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.4.self_attn.out_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.5.self_attn.out_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.6.self_attn.out_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.7.self_attn.out_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.8.self_attn.out_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.9.self_attn.out_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.10.self_attn.out_proj.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.11.self_attn.out_proj.weight")
+];
+let vl_attn_out_biases: [int] = [
+    vl_weight("vision_tower.vision_model.encoder.layers.0.self_attn.out_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.1.self_attn.out_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.2.self_attn.out_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.3.self_attn.out_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.4.self_attn.out_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.5.self_attn.out_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.6.self_attn.out_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.7.self_attn.out_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.8.self_attn.out_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.9.self_attn.out_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.10.self_attn.out_proj.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.11.self_attn.out_proj.bias")
+];
+let vl_fc1_weights: [int] = [
+    vl_weight("vision_tower.vision_model.encoder.layers.0.mlp.fc1.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.1.mlp.fc1.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.2.mlp.fc1.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.3.mlp.fc1.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.4.mlp.fc1.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.5.mlp.fc1.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.6.mlp.fc1.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.7.mlp.fc1.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.8.mlp.fc1.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.9.mlp.fc1.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.10.mlp.fc1.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.11.mlp.fc1.weight")
+];
+let vl_fc1_biases: [int] = [
+    vl_weight("vision_tower.vision_model.encoder.layers.0.mlp.fc1.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.1.mlp.fc1.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.2.mlp.fc1.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.3.mlp.fc1.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.4.mlp.fc1.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.5.mlp.fc1.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.6.mlp.fc1.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.7.mlp.fc1.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.8.mlp.fc1.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.9.mlp.fc1.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.10.mlp.fc1.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.11.mlp.fc1.bias")
+];
+let vl_fc2_weights: [int] = [
+    vl_weight("vision_tower.vision_model.encoder.layers.0.mlp.fc2.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.1.mlp.fc2.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.2.mlp.fc2.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.3.mlp.fc2.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.4.mlp.fc2.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.5.mlp.fc2.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.6.mlp.fc2.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.7.mlp.fc2.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.8.mlp.fc2.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.9.mlp.fc2.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.10.mlp.fc2.weight"),
+    vl_weight("vision_tower.vision_model.encoder.layers.11.mlp.fc2.weight")
+];
+let vl_fc2_biases: [int] = [
+    vl_weight("vision_tower.vision_model.encoder.layers.0.mlp.fc2.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.1.mlp.fc2.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.2.mlp.fc2.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.3.mlp.fc2.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.4.mlp.fc2.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.5.mlp.fc2.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.6.mlp.fc2.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.7.mlp.fc2.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.8.mlp.fc2.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.9.mlp.fc2.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.10.mlp.fc2.bias"),
+    vl_weight("vision_tower.vision_model.encoder.layers.11.mlp.fc2.bias")
+];
+
+fn vision_attention(input: int, layer: int) -> int {
+    let batch: int = flint::tensor::size(input, 0);
+    let seq_len: int = flint::tensor::size(input, 1);
+    let q_linear: int = linear_bias(input, vl_q_weights.copy()[layer], vl_q_biases.copy()[layer]);
+    let k_linear: int = linear_bias(input, vl_k_weights.copy()[layer], vl_k_biases.copy()[layer]);
+    let v_linear: int = linear_bias(input, vl_v_weights.copy()[layer], vl_v_biases.copy()[layer]);
+    let q_heads: int = flint::tensor::transpose(
+        flint::tensor::view4(q_linear, batch, seq_len, 12, 64),
+        1,
+        2
+    );
+    let k_heads: int = flint::tensor::transpose(
+        flint::tensor::view4(k_linear, batch, seq_len, 12, 64),
+        1,
+        2
+    );
+    let v_heads: int = flint::tensor::transpose(
+        flint::tensor::view4(v_linear, batch, seq_len, 12, 64),
+        1,
+        2
+    );
+    let attended: int = flint::nn::scaled_dot_product_attention(
+        q_heads,
+        k_heads,
+        v_heads,
+        false
+    );
+    let transposed: int = flint::tensor::transpose(attended, 1, 2);
+    let contiguous: int = flint::tensor::contiguous(transposed);
+    let merged: int = flint::tensor::view3(contiguous, batch, seq_len, 768);
+    linear_bias(merged, vl_attn_out_weights.copy()[layer], vl_attn_out_biases.copy()[layer])
+}
+
+fn vision_layer(input: int, layer: int) -> int {
+    let norm1: int = layer_norm(
+        input,
+        vl_ln1_weights.copy()[layer],
+        vl_ln1_biases.copy()[layer],
+        768
+    );
+    let attended: int = vision_attention(norm1, layer);
+    let hidden: int = flint::tensor::add(input, attended);
+    let norm2: int = layer_norm(
+        hidden,
+        vl_ln2_weights.copy()[layer],
+        vl_ln2_biases.copy()[layer],
+        768
+    );
+    let mlp_1: int = linear_bias(
+        norm2,
+        vl_fc1_weights.copy()[layer],
+        vl_fc1_biases.copy()[layer]
+    );
+    let activated: int = flint::tensor::gelu(mlp_1, "tanh");
+    let mlp_2: int = linear_bias(
+        activated,
+        vl_fc2_weights.copy()[layer],
+        vl_fc2_biases.copy()[layer]
+    );
+    flint::tensor::add(hidden, mlp_2)
+}
+
+fn vl_image_features(image_path: string) -> int {
+    let patches: int = flint::image::lfm2_vl_patches(image_path);
+    let patch_embeds: int = linear_bias(patches, vl_patch_weight, vl_patch_bias);
+    let pos: int = flint::vl::siglip2_position_embedding(vl_position_weight, 32, 32, 1024);
+    let mut hidden: int = flint::tensor::add(patch_embeds, pos);
+    hidden = vision_layer(hidden, 0);
+    hidden = vision_layer(hidden, 1);
+    hidden = vision_layer(hidden, 2);
+    hidden = vision_layer(hidden, 3);
+    hidden = vision_layer(hidden, 4);
+    hidden = vision_layer(hidden, 5);
+    hidden = vision_layer(hidden, 6);
+    hidden = vision_layer(hidden, 7);
+    hidden = vision_layer(hidden, 8);
+    hidden = vision_layer(hidden, 9);
+    hidden = vision_layer(hidden, 10);
+    hidden = vision_layer(hidden, 11);
+    hidden = layer_norm(hidden, vl_post_ln_weight, vl_post_ln_bias, 768);
+    let feature_2d: int = flint::tensor::view4(hidden, 1, 32, 32, 768);
+    let unshuffled: int = flint::vl::pixel_unshuffle2(feature_2d);
+    let flat: int = flint::tensor::view2(unshuffled, 256, 3072);
+    let projected_1: int = linear_bias(flat, vl_projector_1_weight, vl_projector_1_bias);
+    let projected_act: int = flint::tensor::gelu(projected_1, "none");
+    linear_bias(projected_act, vl_projector_2_weight, vl_projector_2_bias)
+}
+
+fn attention_mixer(
+    input: int,
+    prefix: string,
+    layer: int,
+    incremental: bool,
+    cos: int,
+    sin: int
+) -> int {
+    let batch: int = flint::tensor::size(input, 0);
+    let seq_len: int = flint::tensor::size(input, 1);
+    let hidden: int = rms_norm(input, operator_norm_weights.copy()[layer]);
+    let qkv_linear: int = linear(hidden, qkv_weights.copy()[layer]);
+    let q_linear: int = flint::tensor::narrow(qkv_linear, -1, 0, 1024);
+    let k_linear: int = flint::tensor::narrow(qkv_linear, -1, 1024, 512);
+    let v_linear: int = flint::tensor::narrow(qkv_linear, -1, 1536, 512);
+    let q_view: int = flint::tensor::view4(q_linear, batch, seq_len, 16, 64);
+    let k_view: int = flint::tensor::view4(k_linear, batch, seq_len, 8, 64);
+    let v_view: int = flint::tensor::view4(v_linear, batch, seq_len, 8, 64);
+    let q_norm: int = rms_norm(q_view, q_norm_weights.copy()[layer]);
+    let k_norm: int = rms_norm(k_view, k_norm_weights.copy()[layer]);
+    let q_heads: int = flint::tensor::transpose(q_norm, 1, 2);
+    let k_heads: int = flint::tensor::transpose(k_norm, 1, 2);
+    let v_heads: int = flint::tensor::transpose(v_view, 1, 2);
+    let qk_rot: int = apply_rope_pair(q_heads, k_heads, cos, sin);
+    let q_rot: int = flint::pair::local(qk_rot);
+    let k_rot: int = flint::pair::global(qk_rot);
+    let k_cache_name = prefix + ".self_attn.k_cache";
+    let v_cache_name = prefix + ".self_attn.v_cache";
+    let mut k_all: int = k_rot;
+    let mut v_all: int = v_heads;
+    if incremental {
+        let old_k: int = flint::cache::get(k_cache_name);
+        let old_v: int = flint::cache::get(v_cache_name);
+        let k_cat: int = flint::tensor::cat2(old_k, k_rot, 2);
+        let v_cat: int = flint::tensor::cat2(old_v, v_heads, 2);
+        k_all = k_cat;
+        v_all = v_cat;
+    }
+    flint::cache::set(k_cache_name, k_all);
+    flint::cache::set(v_cache_name, v_all);
+    let k_full: int = repeat_kv(k_all);
+    let v_full: int = repeat_kv(v_all);
+    let attended: int = flint::nn::scaled_dot_product_attention(
+        q_rot,
+        k_full,
+        v_full,
+        !incremental
+    );
+    let transposed: int = flint::tensor::transpose(attended, 1, 2);
+    let contiguous: int = flint::tensor::contiguous(transposed);
+    let merged: int = flint::tensor::view3(contiguous, batch, seq_len, 1024);
+    linear(merged, attention_out_weights.copy()[layer])
+}
+
+fn conv_mixer(input: int, prefix: string, layer: int, incremental: bool) -> int {
+    let seq_len: int = flint::tensor::size(input, 1);
+    let hidden: int = rms_norm(input, operator_norm_weights.copy()[layer]);
+    let projected: int = flint::tensor::transpose(
+        linear(hidden, conv_in_weights.copy()[layer]),
+        -1,
+        -2
+    );
+    let b_part: int = flint::tensor::narrow(projected, 1, 0, 1024);
+    let c_part: int = flint::tensor::narrow(projected, 1, 1024, 1024);
+    let x_part: int = flint::tensor::narrow(projected, 1, 2048, 1024);
+    let bx: int = flint::tensor::mul(b_part, x_part);
+    let state_name = prefix + ".conv.state";
+    let conv_weight: int = conv_weights.copy()[layer];
+    let conv_trimmed: int = if incremental => {
+        let old_state: int = flint::cache::get(state_name);
+        let step_result: int = flint::nn::conv1d_step(old_state, bx, conv_weight);
+        flint::cache::set(state_name, flint::pair::global(step_result));
+        flint::pair::local(step_result)
+    } else => {
+        let conv_full: int = flint::nn::conv1d(bx, conv_weight, 0, 1, 2, 1, 1024);
+        let state: int = flint::tensor::tail(bx, 2, 2);
+        flint::cache::set(state_name, state);
+        flint::tensor::narrow(conv_full, -1, 0, seq_len)
+    };
+    let mixed: int = flint::tensor::transpose(flint::tensor::mul(c_part, conv_trimmed), -1, -2);
+    let mixed_contiguous: int = flint::tensor::contiguous(mixed);
+    linear(mixed_contiguous, conv_out_weights.copy()[layer])
+}
+
+fn mlp(input: int, layer: int) -> int {
+    let gate_up: int = linear(input, mlp_gate_up_weights.copy()[layer]);
+    flint::nn::swiglu_linear(gate_up, mlp_down_weights.copy()[layer], 0)
+}
+
+fn finish_layer(input: int, layer: int, mixed: int) -> int {
+    let hidden_norm: int = add_rms_norm(input, mixed, ffn_norm_weights.copy()[layer]);
+    let hidden: int = flint::pair::local(hidden_norm);
+    let ffn_input: int = flint::pair::global(hidden_norm);
+    flint::tensor::add(hidden, mlp(ffn_input, layer))
+}
+
+fn conv_layer(input: int, prefix: string, layer: int, incremental: bool) -> int {
+    finish_layer(input, layer, conv_mixer(input, prefix, layer, incremental))
+}
+
+fn attention_layer(
+    input: int,
+    prefix: string,
+    layer: int,
+    incremental: bool,
+    cos: int,
+    sin: int
+) -> int {
+    finish_layer(input, layer, attention_mixer(input, prefix, layer, incremental, cos, sin))
+}
+
+fn model_embeddings(embeddings: int, position: int, incremental: bool) -> int {
+    let seq_len: int = flint::tensor::size(embeddings, 1);
+    let cos: int = flint::tensor::rope_cos_at(seq_len, 64, 1000000.0, position);
+    let sin: int = flint::tensor::rope_sin_at(seq_len, 64, 1000000.0, position);
+    let mut hidden: int = embeddings;
+    hidden = conv_layer(hidden, "layers.0", 0, incremental);
+    hidden = conv_layer(hidden, "layers.1", 1, incremental);
+    hidden = attention_layer(hidden, "layers.2", 2, incremental, cos, sin);
+    hidden = conv_layer(hidden, "layers.3", 3, incremental);
+    if is_vl_model() {
+        hidden = conv_layer(hidden, "layers.4", 4, incremental);
+        hidden = attention_layer(hidden, "layers.5", 5, incremental, cos, sin);
+        hidden = conv_layer(hidden, "layers.6", 6, incremental);
+        hidden = conv_layer(hidden, "layers.7", 7, incremental);
+        hidden = attention_layer(hidden, "layers.8", 8, incremental, cos, sin);
+        hidden = conv_layer(hidden, "layers.9", 9, incremental);
+        hidden = attention_layer(hidden, "layers.10", 10, incremental, cos, sin);
+        hidden = conv_layer(hidden, "layers.11", 11, incremental);
+        hidden = attention_layer(hidden, "layers.12", 12, incremental, cos, sin);
+        hidden = conv_layer(hidden, "layers.13", 13, incremental);
+        hidden = attention_layer(hidden, "layers.14", 14, incremental, cos, sin);
+        hidden = conv_layer(hidden, "layers.15", 15, incremental);
+    } else {
+        hidden = attention_layer(hidden, "layers.4", 4, incremental, cos, sin);
+        hidden = conv_layer(hidden, "layers.5", 5, incremental);
+        hidden = attention_layer(hidden, "layers.6", 6, incremental, cos, sin);
+        hidden = conv_layer(hidden, "layers.7", 7, incremental);
+        hidden = attention_layer(hidden, "layers.8", 8, incremental, cos, sin);
+        hidden = conv_layer(hidden, "layers.9", 9, incremental);
+        hidden = attention_layer(hidden, "layers.10", 10, incremental, cos, sin);
+        hidden = conv_layer(hidden, "layers.11", 11, incremental);
+        hidden = attention_layer(hidden, "layers.12", 12, incremental, cos, sin);
+        hidden = conv_layer(hidden, "layers.13", 13, incremental);
+    }
+    let normalized: int = final_norm(hidden);
+    let seq_len: int = flint::tensor::size(normalized, 1);
+    let last_hidden: int = flint::tensor::select(normalized, 1, seq_len - 1);
+    lm_head(last_hidden)
+}
+
+fn model(input_ids: int, position: int, incremental: bool) -> int {
+    let embeddings: int = token_embeddings(input_ids);
+    model_embeddings(embeddings, position, incremental)
+}
+
+let prompt_tokens: int = if is_vl_model() => {
+    let encoded: int = flint::tokenizer::encode_vl_chat(system_prompt, source_text, 256);
+    encoded
+} else => {
+    let encoded: int = flint::tokenizer::encode_chat(system_prompt, source_text);
+    encoded
+};
+let prompt_len: int = flint::tensor::size(prompt_tokens, 1);
+let mut tokens = prompt_tokens;
+let mut step = 0;
+let mut generated_tokens = 0;
+let mut decode_started = false;
+
+flint::cache::clear();
+flint::runtime::start_timer();
+flint::tokenizer::clear_generated_tokens();
+
+let prompt_embeddings: int = token_embeddings(prompt_tokens);
+let initial_embeddings: int = if is_vl_model() => {
+    let image_path: string = flint::runtime::arg(7);
+    let image_features: int = vl_image_features(image_path);
+    let scattered: int = flint::vl::scatter_image_embeddings(
+        prompt_tokens,
+        prompt_embeddings,
+        image_features,
+        396
+    );
+    scattered
+} else => {
+    prompt_embeddings
+};
+
+let mut logits: int = model_embeddings(initial_embeddings, 0, false);
+flint::runtime::compact2(logits, tokens);
+
+if ignore_eos == 0 {
+    while step < max_new_tokens {
+        let next_token: int = flint::tensor::argmax_int(logits, -1);
+        let appended: int = flint::tokenizer::append_token(tokens, next_token);
+        tokens = appended;
+        generated_tokens = generated_tokens + 1;
+        step = step + 1;
+        if flint::tokenizer::is_eos(next_token) {
+            break;
+        }
+        if step < max_new_tokens {
+            let decode_input: int = flint::tokenizer::single_token(next_token);
+            let decode_position: int = prompt_len + generated_tokens - 1;
+            if !decode_started {
+                flint::runtime::start_decode_timer();
+                decode_started = true;
+            }
+            logits = model(decode_input, decode_position, true);
+            flint::runtime::compact2(logits, tokens);
+        }
+    }
+} else {
+    while step < max_new_tokens {
+        let next_token: int = flint::tensor::argmax_token(logits, -1);
+        flint::tokenizer::push_generated_token_tensor(next_token);
+        generated_tokens = generated_tokens + 1;
+        step = step + 1;
+        if step < max_new_tokens {
+            let decode_position: int = prompt_len + generated_tokens - 1;
+            if !decode_started {
+                flint::runtime::start_decode_timer();
+                decode_started = true;
+            }
+            logits = model(next_token, decode_position, true);
+            flint::runtime::compact2(logits, tokens);
+        }
+    }
+}
+
+let output_text: string = if ignore_eos == 0 => {
+    let text: string = flint::tokenizer::decode_generated(tokens, prompt_len);
+    text
+} else => {
+    let text: string = flint::tokenizer::decode_generated_tokens();
+    text
+};
+let decode_tokens: int = if generated_tokens > 0 => {
+    generated_tokens - 1
+} else => {
+    0
+};
+flint::runtime::set_token_count(generated_tokens);
+flint::runtime::set_decode_token_count(decode_tokens);
+flint::runtime::set_text_output(output_text);
