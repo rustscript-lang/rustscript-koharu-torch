@@ -1,10 +1,50 @@
+use stdlib::rss::cli as cli;
 use flint;
 
-let weights_path: string = flint::runtime::arg(0);
-let tokenizer_path: string = flint::runtime::arg(1);
-let text: string = flint::runtime::arg(2);
-let seq_len: int = flint::runtime::arg_int_or(3, 128);
-let label_names: string = flint::runtime::arg_or(4, "O,PER,ORG,ORG-P,ORG-O,LOC,INS,PRD,EVT");
+let parser: int = flint::cli::argument_parser();
+flint::cli::set_description(parser, "Japanese named entity recognition with XLM-RoBERTa");
+let weights_arg: int = cli::required_option::<string>(
+    parser,
+    "",
+    ["-m", "--model"],
+    "Store",
+    "Model safetensors path"
+);
+let tokenizer_arg: int = cli::required_option::<string>(
+    parser,
+    "",
+    ["--tokenizer"],
+    "Store",
+    "Tokenizer path"
+);
+let text_arg: int = cli::required_option::<string>(
+    parser,
+    "",
+    ["--text"],
+    "Store",
+    "Input text"
+);
+let seq_len_arg: int = cli::option::<int>(
+    parser,
+    128,
+    ["-c", "--ctx-size"],
+    "Store",
+    "Maximum token count"
+);
+let labels_arg: int = cli::option::<string>(
+    parser,
+    "O,PER,ORG,ORG-P,ORG-O,LOC,INS,PRD,EVT",
+    ["--labels"],
+    "Store",
+    "Comma-separated label names"
+);
+flint::cli::parse_args(parser);
+
+let weights_path = cli::get::<string>(weights_arg);
+let tokenizer_path = cli::get::<string>(tokenizer_arg);
+let text = cli::get::<string>(text_arg);
+let seq_len = cli::get::<int>(seq_len_arg);
+let label_names = cli::get::<string>(labels_arg);
 
 flint::weights::load(weights_path);
 flint::tokenizer::load(tokenizer_path);

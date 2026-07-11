@@ -1,6 +1,17 @@
+use stdlib::rss::cli as cli;
 use flint;
 
-let backend: string = flint::runtime::arg_or(0, "cpu");
+let parser: int = flint::cli::argument_parser();
+flint::cli::set_description(parser, "List stable-diffusion.cpp GGML devices");
+let backend_arg: int = cli::option::<string>(
+    parser,
+    "cpu",
+    ["--backend"],
+    "Store",
+    "Backend name"
+);
+flint::cli::parse_args(parser);
+let backend = cli::get::<string>(backend_arg);
 let devices: string = flint::ggml::list_stable_diffusion_devices(backend);
 flint::runtime::set_text_output(devices);
 devices;

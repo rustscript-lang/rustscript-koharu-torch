@@ -1,19 +1,84 @@
+use stdlib::rss::cli as cli;
 use flint;
 
-let weights_path: string = flint::runtime::arg(0);
-let tokenizer_path: string = flint::runtime::arg(1);
-let system_prompt: string = flint::runtime::arg(2);
-let source_text: string = flint::runtime::arg(3);
-let max_new_tokens: int = flint::runtime::arg_int(4);
-let ignore_eos: int = flint::runtime::arg_int_or(5, 0);
-let model_kind: int = flint::runtime::arg_int_or(6, 0);
+let parser: int = flint::cli::argument_parser();
+flint::cli::set_description(parser, "LFM2.5 text and vision-language generation");
+let weights_arg: int = cli::required_option::<string>(
+    parser,
+    "",
+    ["-m", "--model"],
+    "Store",
+    "Model safetensors path"
+);
+let tokenizer_arg: int = cli::required_option::<string>(
+    parser,
+    "",
+    ["--tokenizer"],
+    "Store",
+    "Tokenizer path"
+);
+let system_arg: int = cli::required_option::<string>(
+    parser,
+    "",
+    ["-s", "--system-prompt"],
+    "Store",
+    "System prompt"
+);
+let prompt_arg: int = cli::required_option::<string>(
+    parser,
+    "",
+    ["-p", "--prompt"],
+    "Store",
+    "User prompt"
+);
+let predict_arg: int = cli::option::<int>(
+    parser,
+    128,
+    ["-n", "--n-predict"],
+    "Store",
+    "Maximum generated tokens"
+);
+let ignore_eos_arg: int = cli::option::<bool>(
+    parser,
+    false,
+    ["--ignore-eos"],
+    "StoreTrue",
+    "Continue after EOS"
+);
+let model_kind_arg: int = cli::option::<int>(
+    parser,
+    0,
+    ["--model-kind"],
+    "Store",
+    "Model kind: 0=text, 1=vision-language"
+);
+let image_arg: int = cli::option::<string>(
+    parser,
+    "",
+    ["--image"],
+    "Store",
+    "Input image path for model kind 1"
+);
+flint::cli::parse_args(parser);
+
+let weights_path = cli::get::<string>(weights_arg);
+let tokenizer_path = cli::get::<string>(tokenizer_arg);
+let system_prompt = cli::get::<string>(system_arg);
+let source_text = cli::get::<string>(prompt_arg);
+let max_new_tokens = cli::get::<int>(predict_arg);
+let ignore_eos: int = if cli::get::<bool>(ignore_eos_arg) => {
+    1
+} else => {
+    0
+};
+let model_kind = cli::get::<int>(model_kind_arg);
+let image_path = cli::get::<string>(image_arg);
 
 flint::weights::load(weights_path);
 flint::tokenizer::load(tokenizer_path);
 
 fn is_vl_model() -> bool {
-    let kind: int = flint::runtime::arg_int_or(6, 0);
-    kind == 1
+    model_kind == 1
 }
 
 fn model_prefix() -> string {
@@ -288,7 +353,6 @@ let attention_out_weights: [int] = [
     text_optional_weight("layers.14.self_attn.out_proj.weight"),
     text_optional_weight("layers.15.self_attn.out_proj.weight")
 ];
-
 let vl_patch_weight: int = vl_weight("vision_tower.vision_model.embeddings.patch_embedding.weight");
 let vl_patch_bias: int = vl_weight("vision_tower.vision_model.embeddings.patch_embedding.bias");
 let vl_position_weight: int = vl_weight("vision_tower.vision_model.embeddings.position_embedding.weight");
@@ -298,7 +362,6 @@ let vl_projector_1_weight: int = vl_weight("multi_modal_projector.linear_1.weigh
 let vl_projector_1_bias: int = vl_weight("multi_modal_projector.linear_1.bias");
 let vl_projector_2_weight: int = vl_weight("multi_modal_projector.linear_2.weight");
 let vl_projector_2_bias: int = vl_weight("multi_modal_projector.linear_2.bias");
-
 let vl_ln1_weights: [int] = [
     vl_weight("vision_tower.vision_model.encoder.layers.0.layer_norm1.weight"),
     vl_weight("vision_tower.vision_model.encoder.layers.1.layer_norm1.weight"),
@@ -523,7 +586,6 @@ let vl_fc2_biases: [int] = [
     vl_weight("vision_tower.vision_model.encoder.layers.10.mlp.fc2.bias"),
     vl_weight("vision_tower.vision_model.encoder.layers.11.mlp.fc2.bias")
 ];
-
 fn vision_attention(input: int, layer: int) -> int {
     let batch: int = flint::tensor::size(input, 0);
     let seq_len: int = flint::tensor::size(input, 1);
@@ -787,7 +849,7 @@ flint::tokenizer::clear_generated_tokens();
 
 let prompt_embeddings: int = token_embeddings(prompt_tokens);
 let initial_embeddings: int = if is_vl_model() => {
-    let image_path: string = flint::runtime::arg(7);
+    assert(image_path.length > 0);
     let image_features: int = vl_image_features(image_path);
     let scattered: int = flint::vl::scatter_image_embeddings(
         prompt_tokens,

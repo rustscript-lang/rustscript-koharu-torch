@@ -1,6 +1,17 @@
+use stdlib::rss::cli as cli;
 use flint;
 
-let path: string = flint::runtime::arg(0);
+let parser: int = flint::cli::argument_parser();
+flint::cli::set_description(parser, "List GGML devices from a native library path");
+let path_arg: int = cli::required_option::<string>(
+    parser,
+    "",
+    ["--path"],
+    "Store",
+    "Native library path"
+);
+flint::cli::parse_args(parser);
+let path = cli::get::<string>(path_arg);
 let devices: string = flint::ggml::list_devices(path);
 flint::runtime::set_text_output(devices);
 devices;

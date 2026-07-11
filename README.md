@@ -56,15 +56,15 @@ repository checkout so the referenced files under `scripts/` are available;
 The `flint` binary has explicit modes:
 
 ```text
-flint --llm --script scripts/lfm2.rss [--device cuda:0] <weights> <tokenizer> <system-prompt> <text> <max-tokens> [ignore-eos]
-flint --llm --script scripts/lfm2_5.rss [--device cuda:0] <weights> <tokenizer> <system-prompt> <text> <max-tokens> [ignore-eos model-kind image]
-flint --llama --script scripts/llama_quantized.rss <model.gguf> <system-prompt> <user-prompt> [max-tokens backend gpu-layers n-ctx temperature top-k top-p seed]
-flint --llm --script scripts/xlm_roberta_ner_japanese.rss <model.safetensors> <tokenizer.json> <text> [max-len label-csv]
-flint --llm --script scripts/flux_klein_encode_prompt.rss <qwen3.safetensors> <tokenizer.json> <prompt> <prompt.safetensors>
+flint --llm --device cuda:0 --script scripts/lfm2.rss --model <weights> --tokenizer <tokenizer.json> --system-prompt <system> --prompt <text> [--n-predict 128] [--ignore-eos]
+flint --llm --device cuda:0 --script scripts/lfm2_5.rss --model <weights> --tokenizer <tokenizer.json> --system-prompt <system> --prompt <text> [--n-predict 128] [--model-kind 0|1] [--image <image>]
+flint --llama --script scripts/llama_quantized.rss --model <model.gguf> --prompt <text> [llama options]
+flint --llm --script scripts/xlm_roberta_ner_japanese.rss --model <weights> --tokenizer <tokenizer.json> --text <text> [--ctx-size 128] [--labels <csv>]
+flint --llm --script scripts/flux_klein_encode_prompt.rss --model <qwen3.safetensors> --tokenizer <tokenizer.json> --prompt <text> --output <prompt.safetensors>
 flint --lama --weights model.safetensors --image input.png --mask mask.png --output output.png [--device cuda:0]
-flint --sd --script scripts/flux_klein.rss <diffusion-model> <vae> <llm> <prompt> <output.png> [width height steps seed cfg backend params-backend max-vram wtype sample-method scheduler]
-flint --sd --script scripts/ggml_devices.rss [backend]
-flint --sd --script scripts/ggml_devices_from_path.rss <runtime-directory>
+flint --sd --script scripts/flux_klein.rss --diffusion-model <model> --vae <vae> --llm <llm> --prompt <text> --output <output.png> [SD options]
+flint --sd --script scripts/ggml_devices.rss [--backend cpu|cuda|vulkan]
+flint --sd --script scripts/ggml_devices_from_path.rss --path <runtime-directory>
 ```
 
 `--llm` runs Torch-based RustScript model programs. `--llama` runs llama.cpp
@@ -74,15 +74,57 @@ unrelated to llama.cpp.
 
 For `--llm` and `--lama`, omitting `--device` selects `cuda:0` when CUDA is
 available and otherwise falls back to CPU. Passing `--device` accepts `cpu`,
-`cuda`, `cuda:N`, `mps`, or `vulkan`. Native backend selection is passed to the
-RSS script as a positional argument.
+`cuda`, `cuda:N`, `mps`, or `vulkan`. Model-specific arguments after `--script`
+are registered by the RSS program and parsed by `flint::cli` host functions.
+
+### RSS command-line arguments
+
+CLI-facing programs use the host-backed `flint::cli` API, modeled after Rust's
+`argparse` crate. A program creates an argument parser, attaches typed
+references with `refer<T>`, registers `Store`, `StoreOption`, `StoreTrue`, or
+`StoreFalse` actions, and calls `parse_args` once. Named options accept
+`--name value`, `--name=value`, and aliases. Required values, positional
+arguments, generated help, integers, floats, strings, and boolean flags are
+handled by the host parser.
+
+The embedded `stdlib::rss::cli` module supplies generic `option<T>`,
+`required_option<T>`, and `get<T>` helpers while leaving registration and
+parsing in the host. Scripts therefore retain RustScript type information
+without duplicating parsing logic.
+
+Flint embeds the complete RustScript RSS standard library at compile time and
+registers it as module source overrides. `compile_script_file` applies the same
+module setup for library users, so RSS programs may import modules such as
+`stdlib::rss::parse` without a RustScript source checkout at runtime.
 
 `--llama` runs native llama.cpp RSS programs without loading LibTorch. The
 `scripts/llama_quantized.rss` program loads GGUF quantized weights directly,
 builds the prompt with the model chat template, runs batched prompt decode,
-and performs the token generation loop in RustScript. Its `backend` argument
+and performs the token generation loop in RustScript. Its `--backend` argument
 accepts `auto`, `cpu`, `cuda`, `vulkan`, or a compatible llama.cpp runtime
 directory.
+
+| Option | Alias | Default | Meaning |
+|---|---|---:|---|
+| `--model` | `-m` | required | GGUF model path |
+| `--prompt` | `-p` | required | User prompt |
+| `--system-prompt` | `-sys` | helpful assistant | System prompt |
+| `--n-predict` | `-n` | `128` | Maximum generated tokens |
+| `--ctx-size` | `-c` | `2048` | Context size |
+| `--batch-size` | `-b` | `2048` | Logical batch size |
+| `--ubatch-size` | `-ub` | `512` | Physical batch size |
+| `--gpu-layers` | `-ngl` | `999` | Layers assigned to GPU |
+| `--main-gpu` | `-mg` | `0` | Main GPU index |
+| `--threads` | `-t` | `8` | Generation threads |
+| `--threads-batch` | `-tb` | `8` | Prompt batch threads |
+| `--temp` | | `0.7` | Sampling temperature |
+| `--top-k` | | `40` | Top-k sampling |
+| `--top-p` | | `0.95` | Top-p sampling |
+| `--min-p` | | `0.0` | Min-p sampling |
+| `--seed` | `-s` | `42` | Sampling seed |
+| `--backend` | | `auto` | Package name or runtime directory |
+| `--no-mmap` | | off | Disable memory mapping |
+| `--mlock` | | off | Lock model pages in memory |
 
 At koharu commit `3a832b5`, the bundled llama.cpp `b9938` context layout is
 newer than the header used by `koharu-llama-sys`. Until those upstream pieces
@@ -108,18 +150,40 @@ generic tensor, tokenizer, and formatting helpers.
 
 `scripts/lfm2.rss` implements LFM2-350M text generation and translation from
 Torch host functions. `scripts/lfm2_5.rss` supports both LFM2.5-230M text
-generation and LFM2.5-VL-450M image input; its `model-kind` argument is `0` for
-text and `1` for VL, with the image path supplied after it.
+generation and LFM2.5-VL-450M image input; `--model-kind 0` selects text and
+`--model-kind 1 --image <path>` selects VL.
 
 ## Host functions
 
 All functions are registered under the `flint` namespace.
+
+### CLI
+
+Host-backed command-line parsing modeled after `argparse::ArgumentParser` and
+its typed references:
+
+```text
+flint::cli::argument_parser
+flint::cli::set_description
+flint::cli::refer
+flint::cli::add_option
+flint::cli::add_argument
+flint::cli::required
+flint::cli::metavar
+flint::cli::parse_args
+flint::cli::get
+```
+
+`refer` and `get` preserve the reference value type through the generic
+`stdlib::rss::cli` facade. `add_option` accepts an array of aliases and one of
+the argparse action names `Store`, `StoreOption`, `StoreTrue`, or `StoreFalse`.
 
 ### Runtime
 
 Runtime arguments, host inputs, outputs, and tensor lifetime control:
 
 ```text
+flint::runtime::args
 flint::runtime::arg
 flint::runtime::arg_or
 flint::runtime::arg_int
@@ -135,8 +199,9 @@ flint::runtime::set_decode_token_count
 flint::runtime::compact2
 ```
 
-Arguments are addressed by zero-based index. `set_output` publishes a tensor
-handle, while `set_text_output` publishes generated text. Timer and token-count
+`args` returns all script arguments as a string array. Individual arguments can
+also be addressed by zero-based index. `set_output` publishes a tensor handle,
+while `set_text_output` publishes generated text. Timer and token-count
 functions populate the timing and count fields returned by `ScriptTextOutput`;
 the CLI uses them to print throughput. The compact helper keeps long-running
 scripts from retaining unused temporary tensors.
@@ -194,9 +259,9 @@ assignment specs like `te=cpu,vae=cpu,diffusion=cuda0`. Passing `cpu`, `cuda*`,
 or `vulkan*` also selects the matching packaged stable-diffusion.cpp runtime;
 `auto` keeps koharu-runtime's automatic choice.
 
-`scripts/flux_klein.rss` accepts optional `sample-method` and `scheduler`
-arguments after `wtype`. Use `auto` to keep stable-diffusion.cpp defaults, or
-pass upstream names such as `euler`, `euler_a`, `dpm++2m`,
+`scripts/flux_klein.rss` accepts `--sampling-method` and `--scheduler`. Use
+`auto` to keep stable-diffusion.cpp defaults, or pass upstream names such as
+`euler`, `euler_a`, `dpm++2m`,
 `dpm++2m_sde`, `flux2`, `simple`, `karras`, or `beta`.
 
 ### Llama

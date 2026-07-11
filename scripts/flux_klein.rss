@@ -1,21 +1,114 @@
+use stdlib::rss::cli as cli;
 use flint;
 
-let model_source: string = flint::runtime::arg(0);
-let vae_path: string = flint::runtime::arg(1);
-let llm_path: string = flint::runtime::arg(2);
-let prompt: string = flint::runtime::arg(3);
-let output_path: string = flint::runtime::arg(4);
-let width: int = flint::runtime::arg_int_or(5, 1024);
-let height: int = flint::runtime::arg_int_or(6, 1024);
-let steps: int = flint::runtime::arg_int_or(7, 4);
-let seed: int = flint::runtime::arg_int_or(8, 0);
-let cfg_scale: float = flint::runtime::arg_float_or(9, 1.0);
-let backend: string = flint::runtime::arg_or(10, "auto");
-let params_backend: string = flint::runtime::arg_or(11, "auto");
-let max_vram: string = flint::runtime::arg_or(12, "auto");
-let wtype: string = flint::runtime::arg_or(13, "auto");
-let sample_method_name: string = flint::runtime::arg_or(14, "auto");
-let scheduler_name: string = flint::runtime::arg_or(15, "auto");
+let parser: int = flint::cli::argument_parser();
+flint::cli::set_description(parser, "Generate an image with FLUX.2 Klein");
+let model_arg: int = cli::required_option::<string>(
+    parser,
+    "",
+    ["-m", "--diffusion-model"],
+    "Store",
+    "Diffusion model path"
+);
+let vae_arg: int = cli::required_option::<string>(
+    parser,
+    "",
+    ["--vae"],
+    "Store",
+    "VAE model path"
+);
+let llm_arg: int = cli::required_option::<string>(
+    parser,
+    "",
+    ["--llm"],
+    "Store",
+    "Text encoder path"
+);
+let prompt_arg: int = cli::required_option::<string>(
+    parser,
+    "",
+    ["-p", "--prompt"],
+    "Store",
+    "Image prompt"
+);
+let output_arg: int = cli::required_option::<string>(
+    parser,
+    "",
+    ["-o", "--output"],
+    "Store",
+    "Output image path"
+);
+let width_arg: int = cli::option::<int>(
+    parser,
+    1024,
+    ["-W", "--width"],
+    "Store",
+    "Image width"
+);
+let height_arg: int = cli::option::<int>(
+    parser,
+    1024,
+    ["-H", "--height"],
+    "Store",
+    "Image height"
+);
+let steps_arg: int = cli::option::<int>(parser, 4, ["--steps"], "Store", "Sampling steps");
+let seed_arg: int = cli::option::<int>(parser, 0, ["-s", "--seed"], "Store", "Random seed");
+let cfg_arg: int = cli::option::<float>(parser, 1.0, ["--cfg-scale"], "Store", "CFG scale");
+let backend_arg: int = cli::option::<string>(
+    parser,
+    "auto",
+    ["--backend"],
+    "Store",
+    "Compute backend"
+);
+let params_backend_arg: int = cli::option::<string>(
+    parser,
+    "auto",
+    ["--params-backend"],
+    "Store",
+    "Parameter backend"
+);
+let max_vram_arg: int = cli::option::<string>(
+    parser,
+    "auto",
+    ["--max-vram"],
+    "Store",
+    "Maximum VRAM"
+);
+let type_arg: int = cli::option::<string>(parser, "auto", ["--type"], "Store", "Weight type");
+let sampler_arg: int = cli::option::<string>(
+    parser,
+    "auto",
+    ["--sampling-method"],
+    "Store",
+    "Sampling method"
+);
+let scheduler_arg: int = cli::option::<string>(
+    parser,
+    "auto",
+    ["--scheduler"],
+    "Store",
+    "Scheduler"
+);
+flint::cli::parse_args(parser);
+
+let model_source = cli::get::<string>(model_arg);
+let vae_path = cli::get::<string>(vae_arg);
+let llm_path = cli::get::<string>(llm_arg);
+let prompt = cli::get::<string>(prompt_arg);
+let output_path = cli::get::<string>(output_arg);
+let width = cli::get::<int>(width_arg);
+let height = cli::get::<int>(height_arg);
+let steps = cli::get::<int>(steps_arg);
+let seed = cli::get::<int>(seed_arg);
+let cfg_scale = cli::get::<float>(cfg_arg);
+let backend = cli::get::<string>(backend_arg);
+let params_backend = cli::get::<string>(params_backend_arg);
+let max_vram = cli::get::<string>(max_vram_arg);
+let wtype = cli::get::<string>(type_arg);
+let sample_method_name = cli::get::<string>(sampler_arg);
+let scheduler_name = cli::get::<string>(scheduler_arg);
 
 let ctx_params: int = flint::sd::ctx_params_init();
 flint::sd::ctx_params_set_paths(ctx_params, "", model_source, vae_path, llm_path);

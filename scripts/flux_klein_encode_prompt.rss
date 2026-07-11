@@ -1,40 +1,99 @@
+use stdlib::rss::cli as cli;
 use flint;
 
+let parser: int = flint::cli::argument_parser();
+flint::cli::set_description(parser, "Encode a FLUX prompt tensor with Qwen");
+let weights_arg: int = cli::required_option::<string>(
+    parser,
+    "",
+    ["-m", "--model"],
+    "Store",
+    "Qwen safetensors path"
+);
+let tokenizer_arg: int = cli::required_option::<string>(
+    parser,
+    "",
+    ["--tokenizer"],
+    "Store",
+    "Tokenizer path"
+);
+let prompt_arg: int = cli::required_option::<string>(
+    parser,
+    "",
+    ["-p", "--prompt"],
+    "Store",
+    "Prompt text"
+);
+let output_arg: int = cli::required_option::<string>(
+    parser,
+    "",
+    ["-o", "--output"],
+    "Store",
+    "Output safetensors path"
+);
+let max_len_arg: int = cli::option::<int>(
+    parser,
+    512,
+    ["-c", "--ctx-size"],
+    "Store",
+    "Context size"
+);
+let pad_token_arg: int = cli::option::<int>(
+    parser,
+    151643,
+    ["--pad-token"],
+    "Store",
+    "Padding token ID"
+);
+let layers_arg: int = cli::option::<int>(
+    parser,
+    36,
+    ["--layers"],
+    "Store",
+    "Encoder layer count"
+);
+let head_dim_arg: int = cli::option::<int>(
+    parser,
+    128,
+    ["--head-dim"],
+    "Store",
+    "Attention head size"
+);
+let rope_theta_arg: int = cli::option::<float>(
+    parser,
+    1000000.0,
+    ["--rope-theta"],
+    "Store",
+    "RoPE theta"
+);
+flint::cli::parse_args(parser);
 
-
-let weights_path: string = flint::runtime::arg(0);
-let tokenizer_path: string = flint::runtime::arg(1);
-let prompt: string = flint::runtime::arg(2);
-let output_path: string = flint::runtime::arg(3);
-let max_len: int = flint::runtime::arg_int_or(4, 512);
-let pad_token: int = flint::runtime::arg_int_or(5, 151643);
-let num_layers: int = flint::runtime::arg_int_or(6, 36);
-let head_dim: int = flint::runtime::arg_int_or(7, 128);
-let rope_theta: float = flint::runtime::arg_float_or(8, 1000000.0);
-
+let weights_path = cli::get::<string>(weights_arg);
+let tokenizer_path = cli::get::<string>(tokenizer_arg);
+let prompt = cli::get::<string>(prompt_arg);
+let output_path = cli::get::<string>(output_arg);
+let max_len = cli::get::<int>(max_len_arg);
+let pad_token = cli::get::<int>(pad_token_arg);
+let num_layers = cli::get::<int>(layers_arg);
+let head_dim = cli::get::<int>(head_dim_arg);
+let rope_theta = cli::get::<float>(rope_theta_arg);
 flint::weights::load(weights_path);
 flint::tokenizer::load(tokenizer_path);
-
 fn weight(name: string) -> int {
     flint::weights::get(name)
 }
-
 fn layer_weight(layer: int, suffix: string) -> int {
     flint::weights::get_indexed("model.layers.", layer, suffix)
 }
-
 fn linear(input: int, weight_handle: int) -> int {
     flint::nn::linear(input, weight_handle, 0)
 }
-
 fn rms_norm(input: int, weight_handle: int) -> int {
     flint::nn::rms_norm(input, weight_handle, 0.000001)
 }
-
 fn repeat_kv(input: int, repeat: int) -> int {
     flint::tensor::repeat_interleave(input, repeat, 1)
 }
-
 fn qwen_attention(input: int, mask: int, layer: int) -> int {
     let batch: int = flint::tensor::size(input, 0);
     let seq_len: int = flint::tensor::size(input, 1);
@@ -64,7 +123,12 @@ fn qwen_attention(input: int, mask: int, layer: int) -> int {
 
     let k_full: int = repeat_kv(k_rot, repeat);
     let v_full: int = repeat_kv(v_heads, repeat);
-    let attended: int = flint::nn::scaled_dot_product_attention_masked(q_rot, k_full, v_full, mask);
+    let attended: int = flint::nn::scaled_dot_product_attention_masked(
+        q_rot,
+        k_full,
+        v_full,
+        mask
+    );
     let transposed: int = flint::tensor::transpose(attended, 1, 2);
     let merged: int = flint::tensor::view3(
         flint::tensor::contiguous(transposed),
@@ -74,7 +138,6 @@ fn qwen_attention(input: int, mask: int, layer: int) -> int {
     );
     linear(merged, layer_weight(layer, ".self_attn.o_proj.weight"))
 }
-
 fn qwen_mlp(input: int, layer: int) -> int {
     let gate: int = linear(input, layer_weight(layer, ".mlp.gate_proj.weight"));
     let up: int = linear(input, layer_weight(layer, ".mlp.up_proj.weight"));
@@ -87,11 +150,13 @@ fn qwen_layer(hidden: int, mask: int, layer: int) -> int {
     let attn_input: int = rms_norm(hidden, layer_weight(layer, ".input_layernorm.weight"));
     let attn_out: int = qwen_attention(attn_input, mask, layer);
     let with_attn: int = flint::tensor::add(hidden, attn_out);
-    let mlp_input: int = rms_norm(with_attn, layer_weight(layer, ".post_attention_layernorm.weight"));
+    let mlp_input: int = rms_norm(
+        with_attn,
+        layer_weight(layer, ".post_attention_layernorm.weight")
+    );
     let mlp_out: int = qwen_mlp(mlp_input, layer);
     flint::tensor::add(with_attn, mlp_out)
 }
-
 let formatted_prompt: string = "<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
 let encoded: int = flint::tokenizer::encode_padded(formatted_prompt, max_len, pad_token, true);
 let input_ids: int = flint::pair::local(encoded);
@@ -104,7 +169,6 @@ let mut layer: int = 0;
 let mut hidden_9: int = hidden;
 let mut hidden_18: int = hidden;
 let mut hidden_27: int = hidden;
-
 while layer < num_layers {
     if layer == 9 {
         hidden_9 = hidden;
@@ -118,7 +182,6 @@ while layer < num_layers {
     hidden = qwen_layer(hidden, causal_mask, layer);
     layer = layer + 1;
 }
-
 let first: int = flint::tensor::cat2(hidden_9, hidden_18, -1);
 let prompt_embeds: int = flint::tensor::to_float(flint::tensor::cat2(first, hidden_27, -1));
 let ok: bool = flint::tensor::save_safetensors(prompt_embeds, output_path, "prompt_embeds");

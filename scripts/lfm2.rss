@@ -1,10 +1,62 @@
+use stdlib::rss::cli as cli;
 use flint;
-let weights_path: string = flint::runtime::arg(0);
-let tokenizer_path: string = flint::runtime::arg(1);
-let system_prompt: string = flint::runtime::arg(2);
-let source_text: string = flint::runtime::arg(3);
-let max_new_tokens: int = flint::runtime::arg_int(4);
-let ignore_eos: int = flint::runtime::arg_int_or(5, 0);
+
+let parser: int = flint::cli::argument_parser();
+flint::cli::set_description(parser, "LFM2 text generation");
+let weights_arg: int = cli::required_option::<string>(
+    parser,
+    "",
+    ["-m", "--model"],
+    "Store",
+    "Model safetensors path"
+);
+let tokenizer_arg: int = cli::required_option::<string>(
+    parser,
+    "",
+    ["--tokenizer"],
+    "Store",
+    "Tokenizer path"
+);
+let system_arg: int = cli::required_option::<string>(
+    parser,
+    "",
+    ["-s", "--system-prompt"],
+    "Store",
+    "System prompt"
+);
+let prompt_arg: int = cli::required_option::<string>(
+    parser,
+    "",
+    ["-p", "--prompt"],
+    "Store",
+    "User prompt"
+);
+let predict_arg: int = cli::option::<int>(
+    parser,
+    128,
+    ["-n", "--n-predict"],
+    "Store",
+    "Maximum generated tokens"
+);
+let ignore_eos_arg: int = cli::option::<bool>(
+    parser,
+    false,
+    ["--ignore-eos"],
+    "StoreTrue",
+    "Continue after EOS"
+);
+flint::cli::parse_args(parser);
+
+let weights_path = cli::get::<string>(weights_arg);
+let tokenizer_path = cli::get::<string>(tokenizer_arg);
+let system_prompt = cli::get::<string>(system_arg);
+let source_text = cli::get::<string>(prompt_arg);
+let max_new_tokens = cli::get::<int>(predict_arg);
+let ignore_eos: int = if cli::get::<bool>(ignore_eos_arg) => {
+    1
+} else => {
+    0
+};
 flint::weights::load(weights_path);
 flint::tokenizer::load(tokenizer_path);
 fn weight(name: string) -> int {
