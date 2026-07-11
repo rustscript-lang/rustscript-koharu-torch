@@ -611,7 +611,7 @@ fn linear_mv_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var_os("KOHARU_TORCH_LINEAR_MV")
-            .is_some_and(|value| value != "0" && !value.is_empty())
+            .is_none_or(|value| value != "0" && !value.is_empty())
     })
 }
 
