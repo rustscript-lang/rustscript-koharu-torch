@@ -19,7 +19,7 @@ on:
       koharu_version:
         description: 'Koharu dependency version'
         required: false
-        default: '0.61.2'
+        default: '0.62.0-alpha.1'
         type: string
 
 concurrency:
@@ -52,7 +52,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
           INPUT_VERSION: ${{ inputs.version }}
           PD_VM_VERSION: ${{ inputs.pd_vm_version || '0.22.5' }}
-          KOHARU_VERSION: ${{ inputs.koharu_version || '0.61.2' }}
+          KOHARU_VERSION: ${{ inputs.koharu_version || '0.62.0-alpha.1' }}
         run: |
           set -euo pipefail
           if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
