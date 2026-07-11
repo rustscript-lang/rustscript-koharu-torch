@@ -143,7 +143,7 @@ impl Lfm2Native {
         let prompt_len = prompt_ids.len();
         let mut all_ids = prompt_ids.clone();
         let prompt_tokens = self.tokens_tensor(&prompt_ids);
-        let mut all_tokens = prompt_tokens.shallow_clone();
+        let mut generated_token_tensors = Vec::with_capacity(max_new_tokens);
         sync_if_cuda(self.device);
         let total_started = Instant::now();
 
@@ -162,7 +162,7 @@ impl Lfm2Native {
         if ignore_eos {
             for step in 0..max_new_tokens {
                 let next_token = argmax_token(&logits);
-                all_tokens = Tensor::cat(&[&all_tokens, &next_token], 1);
+                generated_token_tensors.push(next_token.shallow_clone());
                 generated_tokens += 1;
                 if step + 1 < max_new_tokens {
                     if decode_started.is_none() {
@@ -199,16 +199,15 @@ impl Lfm2Native {
         sync_if_cuda(self.device);
         let total_elapsed = total_started.elapsed();
         let decode_elapsed = decode_started.map(|started| started.elapsed());
-        let generated_ids = if ignore_eos {
-            token_ids_from_tensor(&all_tokens)?
+        let generated = if ignore_eos {
+            generated_ids_from_tensors(&generated_token_tensors)?
         } else {
             all_ids
+                .into_iter()
+                .skip(prompt_len)
+                .filter_map(|id| u32::try_from(id).ok())
+                .collect::<Vec<_>>()
         };
-        let generated = generated_ids
-            .into_iter()
-            .skip(prompt_len)
-            .filter_map(|id| u32::try_from(id).ok())
-            .collect::<Vec<_>>();
         let text = tokenizer
             .decode(&generated, true)
             .map_err(|err| anyhow::anyhow!("tokenizer decode failed: {err}"))?;
@@ -752,6 +751,18 @@ fn argmax_token(input: &Tensor) -> Tensor {
 fn token_ids_from_tensor(input: &Tensor) -> Result<Vec<i64>> {
     let tokens = input.to_device(Device::Cpu).to_kind(Kind::Int64).view([-1]);
     Vec::<i64>::try_from(&tokens).context("failed to copy token ids")
+}
+
+fn generated_ids_from_tensors(tokens: &[Tensor]) -> Result<Vec<u32>> {
+    if tokens.is_empty() {
+        return Ok(Vec::new());
+    }
+    let token_refs = tokens.iter().collect::<Vec<_>>();
+    token_ids_from_tensor(&Tensor::cat(&token_refs, 1)).map(|ids| {
+        ids.into_iter()
+            .filter_map(|id| u32::try_from(id).ok())
+            .collect()
+    })
 }
 
 fn sync_if_cuda(device: Device) {

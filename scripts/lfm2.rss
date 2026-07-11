@@ -244,6 +244,7 @@ let mut step = 0;
 let mut generated_tokens = 0;
 torch::cache::clear();
 torch::runtime::start_timer();
+torch::tokenizer::clear_generated_tokens();
 let mut logits = model(prompt_tokens, 0, false);
 torch::runtime::compact2(logits, tokens);
 if ignore_eos == 0 {
@@ -266,8 +267,7 @@ if ignore_eos == 0 {
 } else {
     while step < max_new_tokens {
         let next_token: int = torch::tensor::argmax_token(logits, -1);
-        let appended: int = torch::tokenizer::append_token_tensor(tokens, next_token);
-        tokens = appended;
+        torch::tokenizer::push_generated_token_tensor(next_token);
         generated_tokens = generated_tokens + 1;
         step = step + 1;
         if step < max_new_tokens {
@@ -278,6 +278,10 @@ if ignore_eos == 0 {
     }
 }
 
-let output_text: string = torch::tokenizer::decode_generated(tokens, prompt_len);
+let output_text: string = if ignore_eos == 0 => {
+    torch::tokenizer::decode_generated(tokens, prompt_len)
+} else => {
+    torch::tokenizer::decode_generated_tokens()
+};
 torch::runtime::set_token_count(generated_tokens);
 torch::runtime::set_text_output(output_text);

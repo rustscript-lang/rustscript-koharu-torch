@@ -73,6 +73,7 @@ struct TorchContext {
     text_output: Option<String>,
     generation_started_at: Option<Instant>,
     generated_tokens: Option<i64>,
+    generated_token_tensors: Vec<Tensor>,
     host_op_profile_enabled: bool,
     host_op_stats: HashMap<&'static str, HostOpStats>,
     next_tensor: i64,
@@ -137,6 +138,7 @@ impl TorchContext {
         self.text_output = None;
         self.generation_started_at = None;
         self.generated_tokens = None;
+        self.generated_token_tensors.clear();
         self.host_op_stats.clear();
         self.args = args;
         self.next_tensor = 1;
@@ -239,6 +241,7 @@ impl TorchHostRuntime {
                 text_output: None,
                 generation_started_at: None,
                 generated_tokens: None,
+                generated_token_tensors: Vec::new(),
                 host_op_profile_enabled: std::env::var_os("KOHARU_TORCH_PROFILE_OPS").is_some(),
                 host_op_stats: HashMap::new(),
                 next_tensor: 1,
@@ -365,6 +368,18 @@ const HOST_OPS: &[(&str, HostOp)] = &[
     (
         "torch::tokenizer::append_token_tensor",
         tokenizer_append_token_tensor,
+    ),
+    (
+        "torch::tokenizer::clear_generated_tokens",
+        tokenizer_clear_generated_tokens,
+    ),
+    (
+        "torch::tokenizer::push_generated_token_tensor",
+        tokenizer_push_generated_token_tensor,
+    ),
+    (
+        "torch::tokenizer::decode_generated_tokens",
+        tokenizer_decode_generated_tokens,
     ),
     ("torch::tokenizer::single_token", tokenizer_single_token),
     ("torch::tokenizer::is_eos", tokenizer_is_eos),
@@ -670,6 +685,7 @@ fn runtime_start_timer(context: &mut TorchContext, args: &[Value]) -> VmResult<C
     }
     context.generation_started_at = Some(Instant::now());
     context.generated_tokens = None;
+    context.generated_token_tensors.clear();
     return_value(Value::Bool(true))
 }
 
@@ -812,6 +828,57 @@ fn tokenizer_append_token_tensor(
     let next = context.tensor(int_arg(args, 1, "token")?)?;
     let output = Tensor::cat(&[tokens, next], 1);
     return_tensor(context, output)
+}
+
+fn tokenizer_clear_generated_tokens(
+    context: &mut TorchContext,
+    args: &[Value],
+) -> VmResult<CallOutcome> {
+    if !args.is_empty() {
+        return Err(host_error("clear_generated_tokens takes no arguments"));
+    }
+    context.generated_token_tensors.clear();
+    return_value(Value::Bool(true))
+}
+
+fn tokenizer_push_generated_token_tensor(
+    context: &mut TorchContext,
+    args: &[Value],
+) -> VmResult<CallOutcome> {
+    let next = context.tensor(int_arg(args, 0, "token")?)?.shallow_clone();
+    context.generated_token_tensors.push(next);
+    return_value(Value::Bool(true))
+}
+
+fn tokenizer_decode_generated_tokens(
+    context: &mut TorchContext,
+    args: &[Value],
+) -> VmResult<CallOutcome> {
+    if !args.is_empty() {
+        return Err(host_error("decode_generated_tokens takes no arguments"));
+    }
+    let generated = if context.generated_token_tensors.is_empty() {
+        Vec::new()
+    } else {
+        let tokens = context.generated_token_tensors.iter().collect::<Vec<_>>();
+        let ids_tensor = Tensor::cat(&tokens, 1)
+            .to_device(Device::Cpu)
+            .to_kind(Kind::Int64)
+            .view([-1]);
+        let ids = Vec::<i64>::try_from(&ids_tensor)
+            .map_err(|err| host_error(format!("failed to copy token ids: {err}")))?;
+        ids.into_iter()
+            .filter_map(|value| u32::try_from(value).ok())
+            .collect::<Vec<_>>()
+    };
+    let tokenizer = context
+        .tokenizer
+        .as_ref()
+        .ok_or_else(|| host_error("tokenizer has not been loaded"))?;
+    let text = tokenizer
+        .decode(&generated, true)
+        .map_err(|err| host_error(format!("tokenizer decode failed: {err}")))?;
+    return_value(Value::String(text.into()))
 }
 
 fn tokenizer_single_token(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
