@@ -55,6 +55,66 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Preload Linux LibTorch
+        if: runner.os == 'Linux'
+        working-directory: flint
+        shell: python
+        run: |
+          import os
+          import pathlib
+          import shutil
+          import tempfile
+          import urllib.request
+          import zipfile
+
+          version = "2.12.1"
+          url = (
+              "https://download.pytorch.org/libtorch/cpu/"
+              f"libtorch-shared-with-deps-{version}%2Bcpu.zip"
+          )
+          target_dir = pathlib.Path(os.environ.get("CARGO_TARGET_DIR", "target"))
+          package_dir = target_dir / "store" / "libtorch" / version / "cpu"
+          lib_dir = package_dir / "libtorch" / "lib"
+          required = ("libc10.so", "libtorch_cpu.so", "libtorch.so")
+
+          if all((lib_dir / name).is_file() for name in required):
+              raise SystemExit(0)
+
+          package_dir.parent.mkdir(parents=True, exist_ok=True)
+          staging_dir = package_dir.with_name(f"{package_dir.name}.tmp")
+          shutil.rmtree(staging_dir, ignore_errors=True)
+
+          archive_path = None
+          try:
+              with tempfile.NamedTemporaryFile(
+                  dir=package_dir.parent, suffix=".zip", delete=False
+              ) as archive:
+                  archive_path = pathlib.Path(archive.name)
+                  request = urllib.request.Request(
+                      url, headers={"User-Agent": "flint-release-ci"}
+                  )
+                  with urllib.request.urlopen(request, timeout=300) as response:
+                      shutil.copyfileobj(response, archive, length=1024 * 1024)
+
+              with zipfile.ZipFile(archive_path) as zip_file:
+                  damaged = zip_file.testzip()
+                  if damaged is not None:
+                      raise RuntimeError(f"damaged LibTorch member: {damaged}")
+                  zip_file.extractall(staging_dir)
+
+              if not all(
+                  (staging_dir / "libtorch" / "lib" / name).is_file()
+                  for name in required
+              ):
+                  raise RuntimeError("LibTorch archive is missing required libraries")
+
+              shutil.rmtree(package_dir, ignore_errors=True)
+              staging_dir.replace(package_dir)
+          finally:
+              if archive_path is not None:
+                  archive_path.unlink(missing_ok=True)
+              shutil.rmtree(staging_dir, ignore_errors=True)
+
       - name: Build release runner
         working-directory: flint
         run: cargo build --release --locked --bin flint-ai
