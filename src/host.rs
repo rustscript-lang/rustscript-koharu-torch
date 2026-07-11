@@ -1648,10 +1648,8 @@ fn nn_conv1d(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome
     } else {
         Some(context.tensor(bias_handle)?.shallow_clone())
     };
-    let input_float = input.to_kind(Kind::Float);
-    let weight_float = weight.to_kind(Kind::Float);
-    let native_output = input_float.f_conv1d(
-        &weight_float,
+    let native_output = input.f_conv1d(
+        &weight,
         bias.as_ref(),
         [stride],
         [padding],
@@ -1661,6 +1659,8 @@ fn nn_conv1d(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome
     let output = match native_output {
         Ok(output) => output,
         Err(native_err) => {
+            let input_float = input.to_kind(Kind::Float);
+            let weight_float = weight.to_kind(Kind::Float);
             if stride == 1
                 && dilation == 1
                 && input_float.size().len() == 3

@@ -712,6 +712,10 @@ fn is_float_kind(kind: Kind) -> bool {
 
 fn depthwise_conv1d(input: &Tensor, weight: &Tensor, padding: i64) -> Tensor {
     let output_kind = input.kind();
+    let groups = input.size()[1];
+    if let Ok(output) = input.f_conv1d(weight, None::<&Tensor>, [1], [padding], [1], groups) {
+        return output;
+    }
     let input_float = input.to_kind(Kind::Float);
     let weight_float = weight.to_kind(Kind::Float);
     let groups = input_float.size()[1];
