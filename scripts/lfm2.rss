@@ -46,7 +46,7 @@ fn repeat_kv(input: int) -> int {
     torch::tensor::repeat_interleave(input, 2, 1)
 }
 
-fn attention_mixer(input: int, prefix: string, position: int, incremental: bool) -> int {
+fn attention_mixer(input: int, prefix: string, incremental: bool, cos: int, sin: int) -> int {
     let batch: int = torch::tensor::size(input, 0);
     let seq_len: int = torch::tensor::size(input, 1);
     let hidden: int = rms_norm(input, prefix + ".operator_norm.weight");
@@ -67,8 +67,6 @@ fn attention_mixer(input: int, prefix: string, position: int, incremental: bool)
     let k_heads: int = torch::tensor::transpose(k_norm, 1, 2);
     let v_heads: int = torch::tensor::transpose(v_view, 1, 2);
 
-    let cos: int = torch::tensor::rope_cos_at(seq_len, 64, 1000000.0, position);
-    let sin: int = torch::tensor::rope_sin_at(seq_len, 64, 1000000.0, position);
     let q_rot: int = apply_rope(q_heads, cos, sin);
     let k_rot: int = apply_rope(k_heads, cos, sin);
 
@@ -158,8 +156,8 @@ fn conv_mixer(input: int, prefix: string, incremental: bool) -> int {
 
 fn mlp(input: int, prefix: string) -> int {
     let gate_up: int = linear(input, prefix + ".w1_w3.weight");
-    let gated: int = torch::tensor::swiglu(gate_up);
-    linear(gated, prefix + ".w2.weight")
+    let down_weight = weight(prefix + ".w2.weight");
+    torch::nn::swiglu_linear(gate_up, down_weight, 0)
 }
 
 fn finish_layer(input: int, prefix: string, mixed: int) -> int {
@@ -175,30 +173,33 @@ fn conv_layer(input: int, prefix: string, incremental: bool) -> int {
     finish_layer(input, prefix, mixed)
 }
 
-fn attention_layer(input: int, prefix: string, position: int, incremental: bool) -> int {
-    let mixed = attention_mixer(input, prefix, position, incremental);
+fn attention_layer(input: int, prefix: string, incremental: bool, cos: int, sin: int) -> int {
+    let mixed = attention_mixer(input, prefix, incremental, cos, sin);
     finish_layer(input, prefix, mixed)
 }
 
 fn model(input_ids: int, position: int, incremental: bool) -> int {
     let embed_weight = weight("model.embed_tokens.weight");
     let embeddings: int = torch::nn::embedding(input_ids, embed_weight);
+    let seq_len: int = torch::tensor::size(input_ids, 1);
+    let cos: int = torch::tensor::rope_cos_at(seq_len, 64, 1000000.0, position);
+    let sin: int = torch::tensor::rope_sin_at(seq_len, 64, 1000000.0, position);
     let mut hidden: int = embeddings;
     hidden = conv_layer(hidden, "model.layers.0", incremental);
     hidden = conv_layer(hidden, "model.layers.1", incremental);
-    hidden = attention_layer(hidden, "model.layers.2", position, incremental);
+    hidden = attention_layer(hidden, "model.layers.2", incremental, cos, sin);
     hidden = conv_layer(hidden, "model.layers.3", incremental);
     hidden = conv_layer(hidden, "model.layers.4", incremental);
-    hidden = attention_layer(hidden, "model.layers.5", position, incremental);
+    hidden = attention_layer(hidden, "model.layers.5", incremental, cos, sin);
     hidden = conv_layer(hidden, "model.layers.6", incremental);
     hidden = conv_layer(hidden, "model.layers.7", incremental);
-    hidden = attention_layer(hidden, "model.layers.8", position, incremental);
+    hidden = attention_layer(hidden, "model.layers.8", incremental, cos, sin);
     hidden = conv_layer(hidden, "model.layers.9", incremental);
-    hidden = attention_layer(hidden, "model.layers.10", position, incremental);
+    hidden = attention_layer(hidden, "model.layers.10", incremental, cos, sin);
     hidden = conv_layer(hidden, "model.layers.11", incremental);
-    hidden = attention_layer(hidden, "model.layers.12", position, incremental);
+    hidden = attention_layer(hidden, "model.layers.12", incremental, cos, sin);
     hidden = conv_layer(hidden, "model.layers.13", incremental);
-    hidden = attention_layer(hidden, "model.layers.14", position, incremental);
+    hidden = attention_layer(hidden, "model.layers.14", incremental, cos, sin);
     hidden = conv_layer(hidden, "model.layers.15", incremental);
 
     let normalized: int = rms_norm(hidden, "model.embedding_norm.weight");

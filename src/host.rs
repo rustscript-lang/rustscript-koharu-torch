@@ -432,6 +432,7 @@ const HOST_OPS: &[(&str, HostOp)] = &[
     ("torch::tensor::avg_pool2d_2", tensor_avg_pool2d_2),
     ("torch::nn::embedding", nn_embedding),
     ("torch::nn::linear", nn_linear),
+    ("torch::nn::swiglu_linear", nn_swiglu_linear),
     ("torch::nn::rms_norm", nn_rms_norm),
     ("torch::nn::add_rms_norm", nn_add_rms_norm),
     ("torch::nn::apply_rope", nn_apply_rope),
@@ -1436,6 +1437,33 @@ fn linear_mv_enabled() -> bool {
         std::env::var_os("KOHARU_TORCH_LINEAR_MV")
             .is_none_or(|value| value != "0" && !value.is_empty())
     })
+}
+
+fn nn_swiglu_linear(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?.shallow_clone();
+    let weight = context.tensor(int_arg(args, 1, "weight")?)?.shallow_clone();
+    let bias_handle = int_arg(args, 2, "bias")?;
+    let Some(&last_dim) = input.size().last() else {
+        return Err(host_error(
+            "swiglu_linear input must have at least one dimension",
+        ));
+    };
+    if last_dim % 2 != 0 {
+        return Err(host_error(
+            "swiglu_linear input last dimension must be even",
+        ));
+    }
+    let intermediate = last_dim / 2;
+    let gate = input.narrow(-1, 0, intermediate).silu();
+    let up = input.narrow(-1, intermediate, intermediate);
+    let activated = gate * up;
+    let output = if bias_handle == 0 {
+        linear_or_mv(&activated, &weight)
+    } else {
+        let bias = context.tensor(bias_handle)?.shallow_clone();
+        activated.linear(&weight, Some(&bias))
+    };
+    return_tensor(context, output)
 }
 
 fn nn_rms_norm(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
