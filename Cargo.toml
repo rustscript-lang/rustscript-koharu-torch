@@ -16,10 +16,12 @@ path = "src/bin/flint-ai.rs"
 [dependencies]
 anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }
+encoding_rs = "0.8"
 image = "0.25"
 imageproc = "0.27"
 koharu-runtime = { git = "https://github.com/mayocream/koharu.git", branch = "refactor/0705", package = "koharu-runtime" }
 koharu-diffusion = { git = "https://github.com/mayocream/koharu.git", branch = "refactor/0705", package = "koharu-diffusion" }
+koharu-llama = { git = "https://github.com/mayocream/koharu.git", branch = "refactor/0705", package = "koharu-llama" }
 koharu-torch = { git = "https://github.com/mayocream/koharu.git", branch = "refactor/0705", package = "koharu-torch" }
 libloading = "0.8"
 pd-host-function = { path = "../rustscript/pd-host-function" }
