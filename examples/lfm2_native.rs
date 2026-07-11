@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -442,7 +443,12 @@ impl Lfm2Native {
     }
 
     fn linear(&self, input: Tensor, weight_name: &str) -> Result<Tensor> {
-        Ok(input.linear(self.weight(weight_name)?, None::<&Tensor>))
+        let weight = self.weight(weight_name)?;
+        Ok(if linear_mv_enabled() {
+            linear_or_mv(&input, weight)
+        } else {
+            input.linear(weight, None::<&Tensor>)
+        })
     }
 
     fn weight(&self, name: &str) -> Result<&Tensor> {
@@ -580,6 +586,33 @@ fn swiglu(input: &Tensor) -> Tensor {
     let gate = input.narrow(-1, 0, intermediate).silu();
     let up = input.narrow(-1, intermediate, intermediate);
     gate * up
+}
+
+fn linear_or_mv(input: &Tensor, weight: &Tensor) -> Tensor {
+    let input_size = input.size();
+    let weight_size = weight.size();
+    let Some(&out_features) = weight_size.first() else {
+        return input.linear(weight, None::<&Tensor>);
+    };
+    if input_size.len() == 3 && input_size[0] == 1 && input_size[1] == 1 {
+        return weight
+            .mv(&input.view([input_size[2]]))
+            .view([1, 1, out_features]);
+    }
+    if input_size.len() == 2 && input_size[0] == 1 {
+        return weight
+            .mv(&input.view([input_size[1]]))
+            .view([1, out_features]);
+    }
+    input.linear(weight, None::<&Tensor>)
+}
+
+fn linear_mv_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("KOHARU_TORCH_LINEAR_MV")
+            .is_some_and(|value| value != "0" && !value.is_empty())
+    })
 }
 
 fn build_rope_table(
