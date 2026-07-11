@@ -1,0 +1,153 @@
+use flint;
+
+let weights_path: string = flint::runtime::arg(0);
+let tokenizer_path: string = flint::runtime::arg(1);
+let text: string = flint::runtime::arg(2);
+let max_len: int = flint::runtime::arg_int_or(3, 128);
+let label_names: string = flint::runtime::arg_or(4, "O,PER,ORG,ORG-P,ORG-O,LOC,INS,PRD,EVT");
+
+flint::weights::load(weights_path);
+flint::tokenizer::load(tokenizer_path);
+
+fn weight(name: string) -> int {
+    flint::weights::get(name)
+}
+
+fn layer_weight(layer: int, suffix: string) -> int {
+    flint::weights::get_indexed("roberta.encoder.layer.", layer, suffix)
+}
+
+fn linear(input: int, weight_handle: int, bias_handle: int) -> int {
+    flint::nn::linear(input, weight_handle, bias_handle)
+}
+
+fn layer_norm(input: int, weight_handle: int, bias_handle: int) -> int {
+    flint::nn::layer_norm(input, weight_handle, bias_handle, 0.00001, 768)
+}
+
+fn roberta_attention(input: int, padding_mask: int, layer: int) -> int {
+    let query: int = linear(
+        input,
+        layer_weight(layer, ".attention.self.query.weight"),
+        layer_weight(layer, ".attention.self.query.bias")
+    );
+    let key: int = linear(
+        input,
+        layer_weight(layer, ".attention.self.key.weight"),
+        layer_weight(layer, ".attention.self.key.bias")
+    );
+    let value: int = linear(
+        input,
+        layer_weight(layer, ".attention.self.value.weight"),
+        layer_weight(layer, ".attention.self.value.bias")
+    );
+
+    let query_heads: int = flint::tensor::transpose(
+        flint::tensor::view4(query, 1, max_len, 12, 64),
+        1,
+        2
+    );
+    let key_heads: int = flint::tensor::transpose(
+        flint::tensor::view4(key, 1, max_len, 12, 64),
+        1,
+        2
+    );
+    let value_heads: int = flint::tensor::transpose(
+        flint::tensor::view4(value, 1, max_len, 12, 64),
+        1,
+        2
+    );
+    let attended: int = flint::nn::scaled_dot_product_attention_masked(
+        query_heads,
+        key_heads,
+        value_heads,
+        padding_mask
+    );
+    flint::tensor::view3(
+        flint::tensor::contiguous(flint::tensor::transpose(attended, 1, 2)),
+        1,
+        max_len,
+        768
+    )
+}
+
+fn roberta_layer(input: int, padding_mask: int, layer: int) -> int {
+    let attention_context: int = roberta_attention(input, padding_mask, layer);
+    let attention_output: int = linear(
+        attention_context,
+        layer_weight(layer, ".attention.output.dense.weight"),
+        layer_weight(layer, ".attention.output.dense.bias")
+    );
+    let attention_residual: int = flint::tensor::add(attention_output, input);
+    let attention_norm: int = layer_norm(
+        attention_residual,
+        layer_weight(layer, ".attention.output.LayerNorm.weight"),
+        layer_weight(layer, ".attention.output.LayerNorm.bias")
+    );
+
+    let intermediate: int = flint::tensor::gelu(
+        linear(
+            attention_norm,
+            layer_weight(layer, ".intermediate.dense.weight"),
+            layer_weight(layer, ".intermediate.dense.bias")
+        ),
+        "none"
+    );
+    let layer_output: int = linear(
+        intermediate,
+        layer_weight(layer, ".output.dense.weight"),
+        layer_weight(layer, ".output.dense.bias")
+    );
+    let output_residual: int = flint::tensor::add(layer_output, attention_norm);
+    layer_norm(
+        output_residual,
+        layer_weight(layer, ".output.LayerNorm.weight"),
+        layer_weight(layer, ".output.LayerNorm.bias")
+    )
+}
+
+let encoded: int = flint::tokenizer::encode_padded(text, max_len, 1, true);
+let input_ids: int = flint::pair::local(encoded);
+let attention_mask: int = flint::pair::global(encoded);
+let token_type_ids: int = flint::tensor::zeros_like(input_ids);
+let position_ids: int = flint::tensor::view2(
+    flint::tensor::add_scalar(flint::tensor::arange(max_len), 2.0),
+    1,
+    max_len
+);
+
+let word_embeddings: int = flint::nn::embedding(
+    input_ids,
+    weight("roberta.embeddings.word_embeddings.weight")
+);
+let position_embeddings: int = flint::nn::embedding(
+    position_ids,
+    weight("roberta.embeddings.position_embeddings.weight")
+);
+let token_type_embeddings: int = flint::nn::embedding(
+    token_type_ids,
+    weight("roberta.embeddings.token_type_embeddings.weight")
+);
+let embedding_sum: int = flint::tensor::add(
+    flint::tensor::add(word_embeddings, position_embeddings),
+    token_type_embeddings
+);
+let mut_hidden: int = layer_norm(
+    embedding_sum,
+    weight("roberta.embeddings.LayerNorm.weight"),
+    weight("roberta.embeddings.LayerNorm.bias")
+);
+let padding_mask: int = flint::tensor::padding_mask(attention_mask);
+
+let mut layer: int = 0;
+let mut hidden: int = mut_hidden;
+while layer < 12 {
+    hidden = roberta_layer(hidden, padding_mask, layer);
+    layer = layer + 1;
+}
+
+let logits: int = linear(hidden, weight("classifier.weight"), weight("classifier.bias"));
+let labels: int = flint::tensor::argmax(logits, -1);
+let output_text: string = flint::tokenizer::format_token_labels(text, labels, label_names, true);
+flint::runtime::set_text_output(output_text);
+labels;

@@ -35,6 +35,7 @@ The `flint-ai` binary has explicit modes:
 
 ```text
 flint-ai --llm --script scripts/lfm2.rss [--device cuda:0] <args...>
+flint-ai --llm --script scripts/xlm_roberta_ner_japanese.rss <model.safetensors> <tokenizer.json> <text> [max-len label-csv]
 flint-ai --llm --script scripts/flux_klein_encode_prompt.rss <qwen3.safetensors> <tokenizer.json> <prompt> <prompt.safetensors>
 flint-ai --lama --weights model.safetensors --image input.png --mask mask.png --output output.png [--device cuda:0]
 flint-ai --sd --script scripts/flux_klein.rss <diffusion-model> <vae> <llm> <prompt> <output.png> [width height steps seed cfg backend params-backend max-vram wtype sample-method scheduler]
@@ -53,6 +54,11 @@ Qwen3 text encoder paths explicitly.
 RustScript torch operations and writes a koharu-ml-compatible prompt embedding
 file. The safetensors file contains one tensor named `prompt_embeds`; for
 Qwen3-4B FLUX.2 Klein this is expected to be `[1, 512, 7680]`.
+
+`scripts/xlm_roberta_ner_japanese.rss` is a token classification example for
+`tsmatz/xlm-roberta-ner-japanese`. It implements the XLM-RoBERTa encoder and
+classifier from torch host functions in RustScript; the host only provides
+generic tensor, tokenizer, and formatting helpers.
 
 ## Host functions
 
@@ -156,6 +162,7 @@ end-of-sequence checks:
 flint::tokenizer::load
 flint::tokenizer::encode_chat
 flint::tokenizer::encode_padded
+flint::tokenizer::format_token_labels
 flint::tokenizer::decode_generated
 flint::tokenizer::append_token
 flint::tokenizer::append_token_tensor
@@ -209,9 +216,11 @@ flint::tensor::load_safetensors
 flint::tensor::to_float
 flint::tensor::to_bfloat16
 flint::tensor::ones_like
+flint::tensor::zeros_like
 flint::tensor::arange
 flint::tensor::causal_mask
 flint::tensor::causal_padding_mask
+flint::tensor::padding_mask
 flint::tensor::rope_cos
 flint::tensor::rope_sin
 flint::tensor::rope_cos_at
@@ -239,6 +248,7 @@ flint::tensor::tail
 flint::tensor::transpose
 flint::tensor::unsqueeze
 flint::tensor::repeat_interleave
+flint::tensor::argmax
 flint::tensor::argmax_int
 flint::tensor::argmax_token
 flint::tensor::pad_reflect2d

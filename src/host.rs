@@ -632,6 +632,10 @@ const HOST_OPS: &[(&str, HostOp)] = &[
         HostOp::Context(tokenizer_encode_padded),
     ),
     (
+        "flint::tokenizer::format_token_labels",
+        HostOp::Context(tokenizer_format_token_labels),
+    ),
+    (
         "flint::tokenizer::decode_generated",
         HostOp::Context(tokenizer_decode_generated),
     ),
@@ -696,6 +700,10 @@ const HOST_OPS: &[(&str, HostOp)] = &[
         "flint::tensor::ones_like",
         HostOp::Context(tensor_ones_like),
     ),
+    (
+        "flint::tensor::zeros_like",
+        HostOp::Context(tensor_zeros_like),
+    ),
     ("flint::tensor::arange", HostOp::Context(tensor_arange)),
     (
         "flint::tensor::causal_mask",
@@ -704,6 +712,10 @@ const HOST_OPS: &[(&str, HostOp)] = &[
     (
         "flint::tensor::causal_padding_mask",
         HostOp::Context(tensor_causal_padding_mask),
+    ),
+    (
+        "flint::tensor::padding_mask",
+        HostOp::Context(tensor_padding_mask),
     ),
     ("flint::tensor::rope_cos", HostOp::Context(tensor_rope_cos)),
     ("flint::tensor::rope_sin", HostOp::Context(tensor_rope_sin)),
@@ -766,6 +778,7 @@ const HOST_OPS: &[(&str, HostOp)] = &[
         "flint::tensor::argmax_int",
         HostOp::Context(tensor_argmax_int),
     ),
+    ("flint::tensor::argmax", HostOp::Context(tensor_argmax)),
     (
         "flint::tensor::argmax_token",
         HostOp::Context(tensor_argmax_token),
@@ -1294,6 +1307,65 @@ fn tokenizer_encode_padded(context: &mut TorchContext, args: &[Value]) -> VmResu
     }))
 }
 
+fn tokenizer_format_token_labels(
+    context: &mut TorchContext,
+    args: &[Value],
+) -> VmResult<CallOutcome> {
+    let text = string_arg(args, 0, "text")?;
+    let labels = context
+        .tensor(int_arg(args, 1, "labels")?)?
+        .to_device(Device::Cpu)
+        .to_kind(Kind::Int64);
+    let label_names = string_arg(args, 2, "label_names")?
+        .split(',')
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    let add_special_tokens = bool_arg(args, 3, "add_special_tokens")?;
+    let tokenizer = context
+        .tokenizer
+        .as_ref()
+        .ok_or_else(|| host_error("tokenizer has not been loaded"))?;
+    let encoding = tokenizer
+        .encode(text, add_special_tokens)
+        .map_err(|err| host_error(format!("tokenizer encode failed: {err}")))?;
+    let label_ids = Vec::<i64>::try_from(&labels.view([-1]))
+        .map_err(|err| host_error(format!("failed to copy labels: {err}")))?;
+
+    let mut spans: Vec<(String, usize, usize)> = Vec::new();
+    for (index, (start, end)) in encoding.get_offsets().iter().copied().enumerate() {
+        let Some(label_id) = label_ids.get(index).copied() else {
+            break;
+        };
+        if start == end || label_id == 0 {
+            continue;
+        }
+        let label_index =
+            usize::try_from(label_id).map_err(|_| host_error("label id must be non-negative"))?;
+        let label = label_names
+            .get(label_index)
+            .ok_or_else(|| host_error(format!("label id {label_id} is out of range")))?
+            .to_string();
+        if let Some((last_label, _last_start, last_end)) = spans.last_mut()
+            && *last_label == label
+            && start <= *last_end
+        {
+            *last_end = (*last_end).max(end);
+            continue;
+        }
+        spans.push((label, start, end));
+    }
+
+    let mut output = String::new();
+    for (label, start, end) in spans {
+        let surface = text.get(start..end).unwrap_or("");
+        output.push_str(&format!("{label}\t{start}\t{end}\t{surface}\n"));
+    }
+    if output.is_empty() {
+        output.push_str("O\n");
+    }
+    return_value(Value::String(output.into()))
+}
+
 fn tokenizer_decode_generated(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
     let tokens = context
         .tensor(int_arg(args, 0, "tokens")?)?
@@ -1481,6 +1553,10 @@ fn tensor_ones_like(context: &mut TorchContext, args: &[Value]) -> VmResult<Call
     unary_tensor(context, args, Tensor::ones_like)
 }
 
+fn tensor_zeros_like(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    unary_tensor(context, args, Tensor::zeros_like)
+}
+
 fn tensor_arange(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
     let end = int_arg(args, 0, "end")?;
     let output = Tensor::arange(end, (Kind::Int64, context.device));
@@ -1524,6 +1600,29 @@ fn tensor_causal_padding_mask(context: &mut TorchContext, args: &[Value]) -> VmR
     }
     let output = Tensor::from_slice(&values)
         .view([batch as i64, 1, seq_len as i64, seq_len as i64])
+        .to_device(context.device);
+    return_tensor(context, output)
+}
+
+fn tensor_padding_mask(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let attention_mask = context
+        .tensor(int_arg(args, 0, "attention_mask")?)?
+        .to_device(Device::Cpu)
+        .to_kind(Kind::Int64);
+    let size = attention_mask.size();
+    if size.len() != 2 {
+        return Err(host_error("attention_mask must have rank 2"));
+    }
+    let batch = usize::try_from(size[0]).map_err(|_| host_error("batch size out of range"))?;
+    let seq_len = usize::try_from(size[1]).map_err(|_| host_error("seq_len out of range"))?;
+    let mask_values = Vec::<i64>::try_from(&attention_mask.view([-1]))
+        .map_err(|err| host_error(format!("failed to copy attention mask: {err}")))?;
+    let mut values = Vec::with_capacity(batch * seq_len);
+    for value in mask_values {
+        values.push(if value != 0 { 0.0 } else { f32::NEG_INFINITY });
+    }
+    let output = Tensor::from_slice(&values)
+        .view([batch as i64, 1, 1, seq_len as i64])
         .to_device(context.device);
     return_tensor(context, output)
 }
@@ -1842,6 +1941,12 @@ fn tensor_argmax_int(context: &mut TorchContext, args: &[Value]) -> VmResult<Cal
     let dim = int_arg(args, 1, "dim")?;
     let output = input.argmax(dim, false).to_device(Device::Cpu).view([-1]);
     return_int(output.int64_value(&[0]))
+}
+
+fn tensor_argmax(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?;
+    let dim = int_arg(args, 1, "dim")?;
+    return_tensor(context, input.argmax(dim, false))
 }
 
 fn tensor_argmax_token(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
