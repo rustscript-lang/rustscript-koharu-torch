@@ -252,7 +252,11 @@ impl Lfm2Native {
         let seq_len = normalized.size()[1];
         let last_hidden = normalized.select(1, seq_len - 1);
         let lm_head = self.weight_or("lm_head.weight", "model.embed_tokens.weight")?;
-        let output = last_hidden.linear(lm_head, None::<&Tensor>);
+        let output = if linear_mv_enabled() {
+            linear_or_mv(&last_hidden, lm_head)
+        } else {
+            last_hidden.linear(lm_head, None::<&Tensor>)
+        };
         self.profile_end("final_head", timed);
         Ok(output)
     }
