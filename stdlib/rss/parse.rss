@@ -1,0 +1,200 @@
+// Parsing helpers implemented in pure RustScript.
+fn is_whitespace(ch: string) -> bool {
+    match ch {
+        " " => true,
+        "\n" => true,
+        "\r" => true,
+        "\t" => true,
+        _ => false,
+    }
+}
+fn trim(value: string) -> string {
+    let value_len = (&value).length;
+    let mut start = 0;
+    while start < value_len {
+        if is_whitespace((&value)[start:(start + 1)]) {
+            start = start + 1;
+        } else {
+            break;
+        }
+    }
+    let mut end = value_len;
+    while end > start {
+        if is_whitespace((&value)[(end - 1):end]) {
+            end = end - 1;
+        } else {
+            break;
+        }
+    }
+    (&value)[start:end]
+}
+fn digit_value(ch: string) -> int {
+    match ch {
+        "0" => 0,
+        "1" => 1,
+        "2" => 2,
+        "3" => 3,
+        "4" => 4,
+        "5" => 5,
+        "6" => 6,
+        "7" => 7,
+        "8" => 8,
+        "9" => 9,
+        "a" => 10,
+        "A" => 10,
+        "b" => 11,
+        "B" => 11,
+        "c" => 12,
+        "C" => 12,
+        "d" => 13,
+        "D" => 13,
+        "e" => 14,
+        "E" => 14,
+        "f" => 15,
+        "F" => 15,
+        "g" => 16,
+        "G" => 16,
+        "h" => 17,
+        "H" => 17,
+        "i" => 18,
+        "I" => 18,
+        "j" => 19,
+        "J" => 19,
+        "k" => 20,
+        "K" => 20,
+        "l" => 21,
+        "L" => 21,
+        "m" => 22,
+        "M" => 22,
+        "n" => 23,
+        "N" => 23,
+        "o" => 24,
+        "O" => 24,
+        "p" => 25,
+        "P" => 25,
+        "q" => 26,
+        "Q" => 26,
+        "r" => 27,
+        "R" => 27,
+        "s" => 28,
+        "S" => 28,
+        "t" => 29,
+        "T" => 29,
+        "u" => 30,
+        "U" => 30,
+        "v" => 31,
+        "V" => 31,
+        "w" => 32,
+        "W" => 32,
+        "x" => 33,
+        "X" => 33,
+        "y" => 34,
+        "Y" => 34,
+        "z" => 35,
+        "Z" => 35,
+        _ => -1,
+    }
+}
+fn is_valid_base(base: int) -> bool {
+    base >= 2 && base <= 36
+}
+// Returns whether a string is a valid integer literal for the given base.
+pub fn is_int_literal_base(value: string, base: int) -> bool {
+    let text = trim(value);
+    let text_len = (&text).length;
+    let mut out = true;
+    let mut index = 0;
+    if is_valid_base(base) == false || text_len == 0 {
+        out = false;
+    } else {
+        let first = (&text)[0:1];
+        if first == "+" || first == "-" {
+            index = 1;
+        }
+        if index == text_len {
+            out = false;
+        } else {
+            while index < text_len {
+                let digit = digit_value((&text)[index:(index + 1)]);
+                if digit < 0 || digit >= base {
+                    out = false;
+                    break;
+                }
+                index = index + 1;
+            }
+        }
+    }
+    out
+}
+// Returns whether a string is a base-10 integer literal.
+pub fn is_int_literal(value: string) -> bool {
+    is_int_literal_base(value, 10)
+}
+// Parses an integer literal for the given base and returns null on failure.
+pub fn try_parse_int_base(value: string, base: int) -> int? {
+    let text = trim(value);
+    let mut out: int? = null;
+    if is_int_literal_base(text, base) {
+        let mut sign = 1;
+        let mut index = 0;
+        let mut parsed = 0;
+        let first = (&text)[0:1];
+        if first == "-" {
+            sign = -1;
+            index = 1;
+        } else if first == "+" {
+            index = 1;
+        }
+        while index <(&text).length {
+            parsed = parsed * base + digit_value((&text)[index:(index + 1)]);
+            index = index + 1;
+        }
+        out = parsed * sign;
+    }
+    out
+}
+// Parses a base-10 integer literal and returns null on failure.
+pub fn try_parse_int(value: string) -> int? {
+    try_parse_int_base(value, 10)
+}
+// Parses an integer literal for the given base or returns a fallback.
+pub fn parse_int_base_or(value: string, base: int, fallback: int) -> int {
+    let out = try_parse_int_base(value, base);
+    let mut parsed = fallback;
+    if type(out) == "int" {
+        parsed = out;
+    }
+    parsed
+}
+// Parses a base-10 integer literal or returns a fallback.
+pub fn parse_int_or(value: string, fallback: int) -> int {
+    let out = try_parse_int(value);
+    let mut parsed = fallback;
+    if type(out) == "int" {
+        parsed = out;
+    }
+    parsed
+}
+// Returns whether a string is a boolean literal.
+pub fn is_bool_literal(value: string) -> bool {
+    let text = trim(value);
+    text == "true" || text == "false"
+}
+// Parses a boolean literal and returns null on failure.
+pub fn try_parse_bool(value: string) -> bool? {
+    let text = trim(value);
+    match text {
+        "true" => true,
+        "false" => false,
+        _ => null,
+    }
+}
+// Parses a boolean literal or returns a fallback.
+pub fn parse_bool_or(value: string, fallback: bool) -> bool {
+    let out = try_parse_bool(value);
+    let mut parsed = fallback;
+    if type(out) == "bool" {
+        parsed = out;
+    }
+    parsed
+}

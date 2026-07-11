@@ -1,0 +1,124 @@
+// String helpers implemented in pure RustScript using language syntax.
+fn is_whitespace(ch: string) -> bool {
+    match ch {
+        " " => true,
+        "\n" => true,
+        "\r" => true,
+        "\t" => true,
+        _ => false,
+    }
+}
+
+// Returns whether two strings are equal.
+pub fn equals(lhs: string, rhs: string) -> bool {
+    lhs == rhs
+}
+
+// Returns whether a string is empty.
+pub fn is_empty(value: string) -> bool {
+    value.length == 0
+}
+
+// Returns whether a string is not empty.
+pub fn non_empty(value: string) -> bool {
+    !is_empty(value)
+}
+
+// Returns whether a string contains a substring.
+pub fn contains(haystack: string, needle: string) -> bool {
+    let haystack_len = haystack.length;
+    let needle_len = needle.length;
+    let out = if needle_len == 0 => {
+        true
+    } else => {
+        let mut found = false;
+        let limit = haystack_len - needle_len + 1;
+        for index in 0..limit {
+            if equals(haystack[index:(index + needle_len)], needle) {
+                found = true;
+                break;
+            }
+        }
+        found
+    };
+    out
+}
+
+// Splits a string on a separator.
+pub fn split(value: string, separator: string) -> [string] {
+    let value_len = value.length;
+    let separator_len = separator.length;
+    let out: [string] = if separator_len == 0 => {
+        let mut out: [string] = [];
+        for char_index in 0..value_len {
+            out[out.length] = value[char_index:(char_index + 1)];
+        }
+        out
+    } else => {
+        let mut out: [string] = [];
+        let mut cursor = 0;
+        let mut part_start = 0;
+        let limit = value_len - separator_len + 1;
+        while cursor < limit {
+            if equals(value[cursor:(cursor + separator_len)], separator) {
+                out[out.length] = value[part_start:cursor];
+                part_start = cursor + separator_len;
+                cursor = part_start;
+            } else {
+                cursor = cursor + 1;
+            }
+        }
+        out[out.length] = value[part_start:value_len];
+        out
+    };
+    out
+}
+
+// Trims leading and trailing ASCII whitespace from a string.
+pub fn trim(value: string) -> string {
+    let trim_len = value.length;
+    let mut trim_start = 0;
+    while trim_start < trim_len {
+        if is_whitespace(value[trim_start:(trim_start + 1)]) {
+            trim_start = trim_start + 1;
+        } else {
+            break;
+        }
+    }
+
+    let mut trim_end = trim_len;
+    while trim_end > trim_start {
+        if is_whitespace(value[(trim_end - 1):trim_end]) {
+            trim_end = trim_end - 1;
+        } else {
+            break;
+        }
+    }
+    value[trim_start:trim_end]
+}
+
+// Replaces all matching substrings in a string.
+pub fn replace(value: string, needle: string, replacement: string) -> string {
+    let value_len = value.length;
+    let needle_len = needle.length;
+    let out = if needle_len == 0 => {
+        value
+    } else => {
+        let mut index = 0;
+        let mut output = "";
+        while index < value_len {
+            if index + needle_len > value_len {
+                output = output + value[index:(index + 1)];
+                index = index + 1;
+            } else if equals(value[index:(index + needle_len)], needle) {
+                output = output + replacement;
+                index = index + needle_len;
+            } else {
+                output = output + value[index:(index + 1)];
+                index = index + 1;
+            }
+        }
+        output
+    };
+    out
+}

@@ -3,8 +3,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{ArgAction, Parser};
-use flint_ai::{LamaRustScript, ScriptRunner, preload_libtorch, resolve_device};
-use vm::compile_source;
+use flint_ai::{
+    LamaRustScript, ScriptRunner, compile_script_file, preload_libtorch, resolve_device,
+};
 
 #[derive(Debug, Parser)]
 #[command(about = "Run Flint inference programs")]
@@ -39,7 +40,11 @@ struct Cli {
     #[arg(long, value_name = "FILE")]
     output: Option<PathBuf>,
 
-    #[arg(value_name = "ARG", trailing_var_arg = true)]
+    #[arg(
+        value_name = "ARG",
+        trailing_var_arg = true,
+        allow_hyphen_values = true
+    )]
     args: Vec<String>,
 }
 
@@ -72,9 +77,7 @@ async fn run_torch_script(
     args: Vec<String>,
 ) -> Result<()> {
     let script = required_path(script, "--script")?;
-    let source = std::fs::read_to_string(&script)
-        .with_context(|| format!("failed to read {}", script.display()))?;
-    let compiled = compile_source(&source)
+    let compiled = compile_script_file(&script)
         .map_err(|err| anyhow!("failed to compile {}: {err}", script.display()))?;
     let runner = ScriptRunner::with_device(device).await?;
     let output = runner.run_text(Arc::new(compiled.program), args)?;
@@ -87,9 +90,7 @@ async fn run_torch_script(
 
 fn run_native_script(script: Option<PathBuf>, args: Vec<String>) -> Result<()> {
     let script = required_path(script, "--script")?;
-    let source = std::fs::read_to_string(&script)
-        .with_context(|| format!("failed to read {}", script.display()))?;
-    let compiled = compile_source(&source)
+    let compiled = compile_script_file(&script)
         .map_err(|err| anyhow!("failed to compile {}: {err}", script.display()))?;
     let output = ScriptRunner::new().run_text(Arc::new(compiled.program), args)?;
     if !output.text.is_empty() {

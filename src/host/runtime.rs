@@ -11,6 +11,15 @@ fn non_negative_index(value: i64, label: &str) -> VmResult<usize> {
     usize::try_from(value).map_err(|_| host_error(format!("{label} must be non-negative")))
 }
 
+/// Returns all string arguments passed to the script runner.
+#[pd_host_function(name = "flint::runtime::args")]
+pub(super) fn runtime_args_impl() -> VmResult<CallOutcome> {
+    with_context(|context| {
+        let values = context.args.iter().cloned().map(Value::string).collect();
+        return_value(Value::array(values))
+    })
+}
+
 /// Returns one host input tensor handle.
 #[pd_host_function(name = "flint::runtime::input")]
 pub(super) fn runtime_input_impl(index: i64) -> VmResult<CallOutcome> {

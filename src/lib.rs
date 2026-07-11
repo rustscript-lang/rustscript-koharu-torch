@@ -1,4 +1,5 @@
 mod host;
+mod stdlib;
 
 use std::env;
 use std::path::Path;
@@ -10,10 +11,16 @@ use imageproc::contours::{BorderType, find_contours_with_threshold};
 use koharu_runtime::package::{Package, libtorch::Libtorch, loading::preload};
 use koharu_torch::{Cuda, Device, Kind, Tensor};
 pub(crate) use vm::{CallOutcome, Value, VmResult};
-use vm::{Program, compile_source};
+use vm::{
+    CompiledProgram, Program, SourcePathError, compile_source, compile_source_file_with_options,
+};
 
 use crate::host::TorchHostRuntime;
 pub use crate::host::{ScriptRunner, ScriptTextOutput};
+
+pub fn compile_script_file(path: impl AsRef<Path>) -> Result<CompiledProgram, SourcePathError> {
+    compile_source_file_with_options(path, stdlib::compile_options())
+}
 
 pub struct LamaRustScript {
     device: Device,

@@ -1,0 +1,30 @@
+use flint;
+
+// Typed facade over the host-backed argparse reference API.
+pub fn option<T>(
+    parser: int,
+    initial: T,
+    names: [string],
+    action: string,
+    help: string
+) -> int {
+    let reference: int = flint::cli::refer(parser, initial);
+    flint::cli::add_option(reference, names, action, help);
+    reference
+}
+
+pub fn required_option<T>(
+    parser: int,
+    initial: T,
+    names: [string],
+    action: string,
+    help: string
+) -> int {
+    let reference: int = option::<T>(parser, initial, names, action, help);
+    flint::cli::required(reference);
+    reference
+}
+
+pub fn get<T>(reference: int) -> T {
+    flint::cli::get(reference)
+}

@@ -1,0 +1,32 @@
+use stdlib::rss::cli as cli;
+use flint;
+
+let parser: int = flint::cli::argument_parser();
+flint::cli::set_description(parser, "CLI host test");
+let name_arg: int = cli::required_option::<string>(
+    parser,
+    "",
+    ["-n", "--name"],
+    "Store",
+    "Name"
+);
+let count_arg: int = cli::option::<int>(parser, 1, ["--count"], "Store", "Count");
+let mmap_arg: int = cli::option::<bool>(
+    parser,
+    true,
+    ["--no-mmap"],
+    "StoreFalse",
+    "Disable mmap"
+);
+flint::cli::parse_args(parser);
+
+let name = cli::get::<string>(name_arg);
+let count = cli::get::<int>(count_arg);
+let mmap = cli::get::<bool>(mmap_arg);
+let output = if count == 7 && mmap == false => {
+    name
+} else => {
+    "invalid"
+};
+flint::runtime::set_text_output(output);
+output;

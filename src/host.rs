@@ -1,4 +1,5 @@
 mod cache;
+mod cli;
 mod ggml;
 mod llama;
 mod native;
@@ -163,6 +164,8 @@ struct TorchContext {
     pairs: HashMap<i64, FfcPair>,
     inputs: Vec<i64>,
     args: Vec<String>,
+    cli_parsers: HashMap<i64, cli::CliParser>,
+    cli_references: HashMap<i64, cli::CliReference>,
     output: Option<i64>,
     text_output: Option<String>,
     generation_started_at: Option<Instant>,
@@ -176,6 +179,7 @@ struct TorchContext {
     next_tensor: i64,
     next_missing_weight: i64,
     next_pair: i64,
+    next_cli_handle: i64,
 }
 
 #[derive(Default)]
@@ -249,9 +253,12 @@ impl TorchContext {
         self.generated_token_tensors.clear();
         self.host_op_stats.clear();
         self.args = args;
+        self.cli_parsers.clear();
+        self.cli_references.clear();
         self.next_tensor = 1;
         self.next_missing_weight = -1;
         self.next_pair = 1;
+        self.next_cli_handle = 1;
     }
 
     fn record_host_op(&mut self, name: &'static str, elapsed: Duration) {
@@ -294,6 +301,8 @@ impl TorchContext {
         self.rope_cache.clear();
         self.conv1d_step_weights.clear();
         self.args.clear();
+        self.cli_parsers.clear();
+        self.cli_references.clear();
         self.output = None;
         self.text_output = None;
         self.generation_started_at = None;
@@ -322,6 +331,8 @@ impl TorchContext {
         self.rope_cache.clear();
         self.conv1d_step_weights.clear();
         self.args.clear();
+        self.cli_parsers.clear();
+        self.cli_references.clear();
         self.output = None;
         self.print_host_op_stats();
         ScriptTextOutput {
@@ -358,6 +369,8 @@ impl TorchHostRuntime {
                 pairs: HashMap::new(),
                 inputs: Vec::new(),
                 args: Vec::new(),
+                cli_parsers: HashMap::new(),
+                cli_references: HashMap::new(),
                 output: None,
                 text_output: None,
                 generation_started_at: None,
@@ -371,6 +384,7 @@ impl TorchHostRuntime {
                 next_tensor: 1,
                 next_missing_weight: -1,
                 next_pair: 1,
+                next_cli_handle: 1,
             })),
             execution: Mutex::new(()),
         }
@@ -494,6 +508,34 @@ impl Default for ScriptRunner {
 }
 
 const HOST_OPS: &[(&str, HostOp)] = &[
+    (
+        "flint::cli::argument_parser",
+        HostOp::Static(cli::cli_argument_parser),
+    ),
+    (
+        "flint::cli::set_description",
+        HostOp::Static(cli::cli_set_description),
+    ),
+    ("flint::cli::refer", HostOp::Static(cli::cli_refer)),
+    (
+        "flint::cli::add_option",
+        HostOp::Static(cli::cli_add_option),
+    ),
+    (
+        "flint::cli::add_argument",
+        HostOp::Static(cli::cli_add_argument),
+    ),
+    ("flint::cli::required", HostOp::Static(cli::cli_required)),
+    ("flint::cli::metavar", HostOp::Static(cli::cli_metavar)),
+    (
+        "flint::cli::parse_args",
+        HostOp::Static(cli::cli_parse_args),
+    ),
+    ("flint::cli::get", HostOp::Static(cli::cli_get)),
+    (
+        "flint::runtime::args",
+        HostOp::Static(runtime::runtime_args),
+    ),
     ("flint::runtime::arg", HostOp::Static(runtime::runtime_arg)),
     (
         "flint::runtime::arg_int",
@@ -1235,6 +1277,15 @@ impl BorrowHostArg<'_> for String {
         match value {
             Value::String(value) => Ok(value.to_string()),
             _ => Err(VmError::TypeMismatch("string")),
+        }
+    }
+}
+
+impl<'a> BorrowHostArg<'a> for &'a [Value] {
+    fn borrow_host_arg(value: &'a Value, _label: &str) -> VmResult<Self> {
+        match value {
+            Value::Array(value) => Ok(value.as_slice()),
+            _ => Err(VmError::TypeMismatch("array")),
         }
     }
 }
