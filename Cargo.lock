@@ -1013,7 +1013,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1098,24 +1098,6 @@ dependencies = [
  "libz-sys",
  "miniz_oxide",
  "zlib-rs",
-]
-
-[[package]]
-name = "rs-flint"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "image",
- "imageproc",
- "koharu-runtime",
- "koharu-torch",
- "libloading 0.8.9",
- "pd-host-function",
- "pd-vm",
- "tempfile",
- "tokenizers",
- "tokio",
 ]
 
 [[package]]
@@ -1858,6 +1840,28 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "koharu-diffusion"
+version = "0.61.2"
+source = "git+https://github.com/mayocream/koharu.git?branch=refactor%2F0705#efdcc462427dd816d81fe4b11a5ea00ef015f805"
+dependencies = [
+ "image",
+ "koharu-diffusion-sys",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
+name = "koharu-diffusion-sys"
+version = "0.61.2"
+source = "git+https://github.com/mayocream/koharu.git?branch=refactor%2F0705#efdcc462427dd816d81fe4b11a5ea00ef015f805"
+dependencies = [
+ "anyhow",
+ "koharu-bindgen",
+ "libc",
+ "libloading 0.8.9",
 ]
 
 [[package]]
@@ -2691,7 +2695,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3097,6 +3101,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "rs-flint"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "image",
+ "imageproc",
+ "koharu-diffusion",
+ "koharu-runtime",
+ "koharu-torch",
+ "libloading 0.8.9",
+ "pd-host-function",
+ "pd-vm",
+ "tempfile",
+ "tokenizers",
+ "tokio",
+]
+
+[[package]]
 name = "rt-format"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3154,7 +3177,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3211,7 +3234,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3642,7 +3665,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4224,7 +4247,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

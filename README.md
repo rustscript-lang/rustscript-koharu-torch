@@ -46,9 +46,9 @@ When `--device` is omitted, the CLI initializes LibTorch and selects `cuda:0`
 when CUDA is available. Passing `--device` overrides that selection.
 
 `scripts/flux_klein.rss` builds a FLUX.2 Klein text-to-image run from the
-low-level `flint::sd::*` wrappers around the stable-diffusion.cpp C API
-packaged by `koharu-runtime`; pass the FLUX.2 Klein diffusion model, VAE, and
-Qwen3 text encoder paths explicitly.
+low-level `flint::sd::*` API backed by `koharu-diffusion`. The native
+stable-diffusion.cpp runtime is packaged by `koharu-runtime`; pass the FLUX.2
+Klein diffusion model, VAE, and Qwen3 text encoder paths explicitly.
 
 `scripts/flux_klein_encode_prompt.rss` runs a Qwen3 text encoder with
 RustScript torch operations and writes a koharu-ml-compatible prompt embedding
@@ -130,12 +130,12 @@ flint::sd::images_save
 flint::sd::free_sd_images
 ```
 
-The `flint::sd::*` functions expose C API-shaped resource handles for context
-params, contexts, image generation params, and image batches. Optional backend
-strings follow sd.cpp names such as `cpu`, `cuda0`, or assignment specs like
-`te=cpu,vae=cpu,diffusion=cuda0`. Passing `cpu`, `cuda*`, or `vulkan*` also
-selects the matching packaged stable-diffusion.cpp runtime; `auto` keeps
-koharu-runtime's automatic choice.
+The `flint::sd::*` functions expose C API-shaped resource handles backed by
+the owning context, parameter, and image types from `koharu-diffusion`.
+Optional backend strings follow sd.cpp names such as `cpu`, `cuda0`, or
+assignment specs like `te=cpu,vae=cpu,diffusion=cuda0`. Passing `cpu`, `cuda*`,
+or `vulkan*` also selects the matching packaged stable-diffusion.cpp runtime;
+`auto` keeps koharu-runtime's automatic choice.
 
 `scripts/flux_klein.rss` accepts optional `sample-method` and `scheduler`
 arguments after `wtype`. Use `auto` to keep stable-diffusion.cpp defaults, or
