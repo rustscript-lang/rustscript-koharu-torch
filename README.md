@@ -15,13 +15,11 @@ RustScript VM.
 
 ## How it works
 
-Flint compiles a RustScript program and binds the `flint::*` host functions
-listed below. There are two library runners:
-
-- `TorchScriptRunner` initializes LibTorch and executes tensor programs on a
-  selected CPU, CUDA, MPS, or Vulkan device.
-- `ScriptRunner` executes native GGML, llama.cpp, and stable-diffusion.cpp
-  programs without initializing LibTorch.
+Flint compiles a RustScript program and runs it with `ScriptRunner`, which binds
+the `flint::*` host functions listed below. `ScriptRunner::new()` executes
+native GGML, llama.cpp, and stable-diffusion.cpp programs without initializing
+LibTorch. `ScriptRunner::with_device(device).await` initializes LibTorch and
+executes tensor programs on the selected CPU, CUDA, MPS, or Vulkan device.
 
 Tensor and pair values cross the VM boundary as opaque integer handles. A
 RustScript program uses those handles to compose a graph, then publishes its
@@ -33,8 +31,8 @@ resources retain their upstream formats, including quantized GGUF tensors.
 A typical integration follows this flow:
 
 1. Compile a `.rss` source file with RustScript.
-2. Create `TorchScriptRunner::new(device)` for Torch programs or
-   `ScriptRunner::new()` for native programs.
+2. Create `ScriptRunner::new()` for native programs or
+   `ScriptRunner::with_device(device).await` for Torch programs.
 3. Pass the compiled program and string arguments to `run_text`.
 4. Read the published text from `ScriptTextOutput`.
 

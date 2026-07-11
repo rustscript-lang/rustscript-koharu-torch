@@ -398,27 +398,12 @@ impl TorchHostRuntime {
         self.context.get().finish()
     }
 
-    pub(crate) fn run_text(
+    fn run_text(
         &self,
         program: Arc<Program>,
         args: Vec<String>,
+        mode: ScriptExecutionMode,
     ) -> Result<ScriptTextOutput> {
-        let _execution = self
-            .execution
-            .lock()
-            .map_err(|_| anyhow!("Torch execution lock is poisoned"))?;
-        self.context.get().begin_args(args);
-        let mut vm = Vm::new_shared_with_jit_config(program, torch_jit_config());
-        self.bind(&mut vm);
-        let _current_context = self.context.enter();
-        let status = koharu_torch::no_grad(|| vm.run()).map_err(|err| anyhow!(err.to_string()))?;
-        if status != VmStatus::Halted {
-            bail!("RustScript did not halt: {status:?}");
-        }
-        Ok(self.context.get().finish_text())
-    }
-
-    fn run_text_plain(&self, program: Arc<Program>, args: Vec<String>) -> Result<ScriptTextOutput> {
         let _execution = self
             .execution
             .lock()
@@ -427,7 +412,11 @@ impl TorchHostRuntime {
         let mut vm = Vm::new_shared_with_jit_config(program, torch_jit_config());
         self.bind(&mut vm);
         let _current_context = self.context.enter();
-        let status = vm.run().map_err(|err| anyhow!(err.to_string()))?;
+        let status = match mode {
+            ScriptExecutionMode::Native => vm.run(),
+            ScriptExecutionMode::Torch => koharu_torch::no_grad(|| vm.run()),
+        }
+        .map_err(|err| anyhow!(err.to_string()))?;
         if status != VmStatus::Halted {
             bail!("RustScript did not halt: {status:?}");
         }
@@ -456,12 +445,15 @@ fn torch_jit_config() -> JitConfig {
     }
 }
 
-pub struct TorchScriptRunner {
-    runtime: TorchHostRuntime,
-}
-
 pub struct ScriptRunner {
     runtime: TorchHostRuntime,
+    mode: ScriptExecutionMode,
+}
+
+#[derive(Clone, Copy)]
+enum ScriptExecutionMode {
+    Native,
+    Torch,
 }
 
 pub struct ScriptTextOutput {
@@ -472,30 +464,26 @@ pub struct ScriptTextOutput {
     pub decode_elapsed: Option<Duration>,
 }
 
-impl TorchScriptRunner {
-    pub async fn new(device: Device) -> Result<Self> {
+impl ScriptRunner {
+    pub fn new() -> Self {
+        Self {
+            runtime: TorchHostRuntime::new(Device::Cpu),
+            mode: ScriptExecutionMode::Native,
+        }
+    }
+
+    pub async fn with_device(device: Device) -> Result<Self> {
         crate::preload_libtorch()
             .await
             .context("failed to initialize LibTorch runtime")?;
         Ok(Self {
             runtime: TorchHostRuntime::new(device),
+            mode: ScriptExecutionMode::Torch,
         })
     }
 
     pub fn run_text(&self, program: Arc<Program>, args: Vec<String>) -> Result<ScriptTextOutput> {
-        self.runtime.run_text(program, args)
-    }
-}
-
-impl ScriptRunner {
-    pub fn new() -> Self {
-        Self {
-            runtime: TorchHostRuntime::new(Device::Cpu),
-        }
-    }
-
-    pub fn run_text(&self, program: Arc<Program>, args: Vec<String>) -> Result<ScriptTextOutput> {
-        self.runtime.run_text_plain(program, args)
+        self.runtime.run_text(program, args, self.mode)
     }
 }
 

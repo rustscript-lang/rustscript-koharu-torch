@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{ArgAction, Parser};
-use flint_ai::{LamaRustScript, ScriptRunner, TorchScriptRunner, preload_libtorch, resolve_device};
+use flint_ai::{LamaRustScript, ScriptRunner, preload_libtorch, resolve_device};
 use vm::compile_source;
 
 #[derive(Debug, Parser)]
@@ -76,7 +76,7 @@ async fn run_torch_script(
         .with_context(|| format!("failed to read {}", script.display()))?;
     let compiled = compile_source(&source)
         .map_err(|err| anyhow!("failed to compile {}: {err}", script.display()))?;
-    let runner = TorchScriptRunner::new(device).await?;
+    let runner = ScriptRunner::with_device(device).await?;
     let output = runner.run_text(Arc::new(compiled.program), args)?;
     if !output.text.is_empty() {
         println!("{}", output.text);
