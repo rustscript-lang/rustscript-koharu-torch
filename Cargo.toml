@@ -5,6 +5,10 @@ edition = "2024"
 license = "GPL-3.0-only"
 description = "Run koharu-torch inference graphs from RustScript host functions"
 
+[[bin]]
+name = "flint-ai"
+path = "src/bin/flint-ai.rs"
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }

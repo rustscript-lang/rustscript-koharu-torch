@@ -8,12 +8,12 @@ use anyhow::{Context, Result, anyhow, ensure};
 use image::{DynamicImage, GrayImage, RgbImage};
 use imageproc::contours::{BorderType, find_contours_with_threshold};
 use koharu_runtime::package::{Package, libtorch::Libtorch, loading::preload};
-use koharu_torch::{Device, Kind, Tensor};
+use koharu_torch::{Cuda, Device, Kind, Tensor};
 pub(crate) use vm::{CallOutcome, Value, VmResult};
 use vm::{Program, compile_source};
 
 use crate::host::TorchHostRuntime;
-pub use crate::host::TorchScriptRunner;
+pub use crate::host::{ScriptTextOutput, TorchScriptRunner};
 
 pub struct LamaRustScript {
     device: Device,
@@ -182,6 +182,21 @@ pub fn parse_device(value: &str) -> Result<Device> {
             .parse::<usize>()
             .map(Device::Cuda)
             .context("invalid CUDA device index"),
+    }
+}
+
+pub fn auto_device() -> Device {
+    if Cuda::is_available() && Cuda::device_count() > 0 {
+        Device::Cuda(0)
+    } else {
+        Device::Cpu
+    }
+}
+
+pub fn resolve_device(value: Option<&str>) -> Result<Device> {
+    match value {
+        Some(value) => parse_device(value),
+        None => Ok(auto_device()),
     }
 }
 

@@ -29,6 +29,18 @@ A typical integration follows this flow:
 3. Pass the compiled program and string arguments to `run_text`.
 4. Read the published text from `ScriptTextOutput`.
 
+## CLI
+
+The `flint-ai` binary has explicit modes:
+
+```text
+flint-ai --llm --script scripts/lfm2.rss [--device cuda:0] <args...>
+flint-ai --lama --weights model.safetensors --image input.png --mask mask.png --output output.png [--device cuda:0]
+```
+
+When `--device` is omitted, the CLI initializes LibTorch and selects `cuda:0`
+when CUDA is available. Passing `--device` overrides that selection.
+
 ## Host functions
 
 All functions are registered under the `flint` namespace.
