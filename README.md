@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/flint-ai.svg)](https://crates.io/crates/flint-ai)
 
-> Script the graph. Run it native.
+> Flint is all you need to light the Torch.
 
 Flint is an AI framework for defining and running model graphs in
 [RustScript](https://github.com/rustscript-lang/rustscript). It exposes native
