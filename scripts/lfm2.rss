@@ -10,17 +10,14 @@ torch::tokenizer::load(tokenizer_path);
 fn weight(name: string) -> int {
     torch::weights::get(name)
 }
-fn linear(input: int, name: string) -> int {
-    let w = weight(name);
-    torch::nn::linear(input, w, 0)
+fn linear(input: int, weight_handle: int) -> int {
+    torch::nn::linear(input, weight_handle, 0)
 }
-fn rms_norm(input: int, weight_name: string) -> int {
-    let scale_weight = weight(weight_name);
-    torch::nn::rms_norm(input, scale_weight, 0.00001)
+fn rms_norm(input: int, weight_handle: int) -> int {
+    torch::nn::rms_norm(input, weight_handle, 0.00001)
 }
-fn add_rms_norm(input: int, residual: int, weight_name: string) -> int {
-    let scale_weight = weight(weight_name);
-    torch::nn::add_rms_norm(input, residual, scale_weight, 0.00001)
+fn add_rms_norm(input: int, residual: int, weight_handle: int) -> int {
+    torch::nn::add_rms_norm(input, residual, weight_handle, 0.00001)
 }
 fn rotate_half(input: int) -> int {
     let head_dim: int = torch::tensor::size(input, -1);
@@ -39,19 +36,227 @@ fn apply_rope_pair(query: int, key: int, cos: int, sin: int) -> int {
 fn repeat_kv(input: int) -> int {
     torch::tensor::repeat_interleave(input, 2, 1)
 }
-fn attention_mixer(input: int, prefix: string, incremental: bool, cos: int, sin: int) -> int {
+let embed_weight: int = weight("model.embed_tokens.weight");
+let embedding_norm_weight: int = weight("model.embedding_norm.weight");
+let lm_head_weight: int = torch::weights::get_or("lm_head.weight", "model.embed_tokens.weight");
+let operator_norm_weights: [int] = [
+    weight("model.layers.0.operator_norm.weight"),
+    weight("model.layers.1.operator_norm.weight"),
+    weight("model.layers.2.operator_norm.weight"),
+    weight("model.layers.3.operator_norm.weight"),
+    weight("model.layers.4.operator_norm.weight"),
+    weight("model.layers.5.operator_norm.weight"),
+    weight("model.layers.6.operator_norm.weight"),
+    weight("model.layers.7.operator_norm.weight"),
+    weight("model.layers.8.operator_norm.weight"),
+    weight("model.layers.9.operator_norm.weight"),
+    weight("model.layers.10.operator_norm.weight"),
+    weight("model.layers.11.operator_norm.weight"),
+    weight("model.layers.12.operator_norm.weight"),
+    weight("model.layers.13.operator_norm.weight"),
+    weight("model.layers.14.operator_norm.weight"),
+    weight("model.layers.15.operator_norm.weight")
+];
+let ffn_norm_weights: [int] = [
+    weight("model.layers.0.ffn_norm.weight"),
+    weight("model.layers.1.ffn_norm.weight"),
+    weight("model.layers.2.ffn_norm.weight"),
+    weight("model.layers.3.ffn_norm.weight"),
+    weight("model.layers.4.ffn_norm.weight"),
+    weight("model.layers.5.ffn_norm.weight"),
+    weight("model.layers.6.ffn_norm.weight"),
+    weight("model.layers.7.ffn_norm.weight"),
+    weight("model.layers.8.ffn_norm.weight"),
+    weight("model.layers.9.ffn_norm.weight"),
+    weight("model.layers.10.ffn_norm.weight"),
+    weight("model.layers.11.ffn_norm.weight"),
+    weight("model.layers.12.ffn_norm.weight"),
+    weight("model.layers.13.ffn_norm.weight"),
+    weight("model.layers.14.ffn_norm.weight"),
+    weight("model.layers.15.ffn_norm.weight")
+];
+let mlp_gate_up_weights: [int] = [
+    weight("model.layers.0.feed_forward.w1_w3.weight"),
+    weight("model.layers.1.feed_forward.w1_w3.weight"),
+    weight("model.layers.2.feed_forward.w1_w3.weight"),
+    weight("model.layers.3.feed_forward.w1_w3.weight"),
+    weight("model.layers.4.feed_forward.w1_w3.weight"),
+    weight("model.layers.5.feed_forward.w1_w3.weight"),
+    weight("model.layers.6.feed_forward.w1_w3.weight"),
+    weight("model.layers.7.feed_forward.w1_w3.weight"),
+    weight("model.layers.8.feed_forward.w1_w3.weight"),
+    weight("model.layers.9.feed_forward.w1_w3.weight"),
+    weight("model.layers.10.feed_forward.w1_w3.weight"),
+    weight("model.layers.11.feed_forward.w1_w3.weight"),
+    weight("model.layers.12.feed_forward.w1_w3.weight"),
+    weight("model.layers.13.feed_forward.w1_w3.weight"),
+    weight("model.layers.14.feed_forward.w1_w3.weight"),
+    weight("model.layers.15.feed_forward.w1_w3.weight")
+];
+let mlp_down_weights: [int] = [
+    weight("model.layers.0.feed_forward.w2.weight"),
+    weight("model.layers.1.feed_forward.w2.weight"),
+    weight("model.layers.2.feed_forward.w2.weight"),
+    weight("model.layers.3.feed_forward.w2.weight"),
+    weight("model.layers.4.feed_forward.w2.weight"),
+    weight("model.layers.5.feed_forward.w2.weight"),
+    weight("model.layers.6.feed_forward.w2.weight"),
+    weight("model.layers.7.feed_forward.w2.weight"),
+    weight("model.layers.8.feed_forward.w2.weight"),
+    weight("model.layers.9.feed_forward.w2.weight"),
+    weight("model.layers.10.feed_forward.w2.weight"),
+    weight("model.layers.11.feed_forward.w2.weight"),
+    weight("model.layers.12.feed_forward.w2.weight"),
+    weight("model.layers.13.feed_forward.w2.weight"),
+    weight("model.layers.14.feed_forward.w2.weight"),
+    weight("model.layers.15.feed_forward.w2.weight")
+];
+let conv_in_weights: [int] = [
+    weight("model.layers.0.conv.in_proj.weight"),
+    weight("model.layers.1.conv.in_proj.weight"),
+    0,
+    weight("model.layers.3.conv.in_proj.weight"),
+    weight("model.layers.4.conv.in_proj.weight"),
+    0,
+    weight("model.layers.6.conv.in_proj.weight"),
+    weight("model.layers.7.conv.in_proj.weight"),
+    0,
+    weight("model.layers.9.conv.in_proj.weight"),
+    0,
+    weight("model.layers.11.conv.in_proj.weight"),
+    0,
+    weight("model.layers.13.conv.in_proj.weight"),
+    0,
+    weight("model.layers.15.conv.in_proj.weight")
+];
+let conv_weights: [int] = [
+    weight("model.layers.0.conv.conv.weight"),
+    weight("model.layers.1.conv.conv.weight"),
+    0,
+    weight("model.layers.3.conv.conv.weight"),
+    weight("model.layers.4.conv.conv.weight"),
+    0,
+    weight("model.layers.6.conv.conv.weight"),
+    weight("model.layers.7.conv.conv.weight"),
+    0,
+    weight("model.layers.9.conv.conv.weight"),
+    0,
+    weight("model.layers.11.conv.conv.weight"),
+    0,
+    weight("model.layers.13.conv.conv.weight"),
+    0,
+    weight("model.layers.15.conv.conv.weight")
+];
+let conv_out_weights: [int] = [
+    weight("model.layers.0.conv.out_proj.weight"),
+    weight("model.layers.1.conv.out_proj.weight"),
+    0,
+    weight("model.layers.3.conv.out_proj.weight"),
+    weight("model.layers.4.conv.out_proj.weight"),
+    0,
+    weight("model.layers.6.conv.out_proj.weight"),
+    weight("model.layers.7.conv.out_proj.weight"),
+    0,
+    weight("model.layers.9.conv.out_proj.weight"),
+    0,
+    weight("model.layers.11.conv.out_proj.weight"),
+    0,
+    weight("model.layers.13.conv.out_proj.weight"),
+    0,
+    weight("model.layers.15.conv.out_proj.weight")
+];
+let qkv_weights: [int] = [
+    0,
+    0,
+    weight("model.layers.2.self_attn.qkv_proj.weight"),
+    0,
+    0,
+    weight("model.layers.5.self_attn.qkv_proj.weight"),
+    0,
+    0,
+    weight("model.layers.8.self_attn.qkv_proj.weight"),
+    0,
+    weight("model.layers.10.self_attn.qkv_proj.weight"),
+    0,
+    weight("model.layers.12.self_attn.qkv_proj.weight"),
+    0,
+    weight("model.layers.14.self_attn.qkv_proj.weight"),
+    0
+];
+let q_norm_weights: [int] = [
+    0,
+    0,
+    weight("model.layers.2.self_attn.q_layernorm.weight"),
+    0,
+    0,
+    weight("model.layers.5.self_attn.q_layernorm.weight"),
+    0,
+    0,
+    weight("model.layers.8.self_attn.q_layernorm.weight"),
+    0,
+    weight("model.layers.10.self_attn.q_layernorm.weight"),
+    0,
+    weight("model.layers.12.self_attn.q_layernorm.weight"),
+    0,
+    weight("model.layers.14.self_attn.q_layernorm.weight"),
+    0
+];
+let k_norm_weights: [int] = [
+    0,
+    0,
+    weight("model.layers.2.self_attn.k_layernorm.weight"),
+    0,
+    0,
+    weight("model.layers.5.self_attn.k_layernorm.weight"),
+    0,
+    0,
+    weight("model.layers.8.self_attn.k_layernorm.weight"),
+    0,
+    weight("model.layers.10.self_attn.k_layernorm.weight"),
+    0,
+    weight("model.layers.12.self_attn.k_layernorm.weight"),
+    0,
+    weight("model.layers.14.self_attn.k_layernorm.weight"),
+    0
+];
+let attention_out_weights: [int] = [
+    0,
+    0,
+    weight("model.layers.2.self_attn.out_proj.weight"),
+    0,
+    0,
+    weight("model.layers.5.self_attn.out_proj.weight"),
+    0,
+    0,
+    weight("model.layers.8.self_attn.out_proj.weight"),
+    0,
+    weight("model.layers.10.self_attn.out_proj.weight"),
+    0,
+    weight("model.layers.12.self_attn.out_proj.weight"),
+    0,
+    weight("model.layers.14.self_attn.out_proj.weight"),
+    0
+];
+fn attention_mixer(
+    input: int,
+    prefix: string,
+    layer: int,
+    incremental: bool,
+    cos: int,
+    sin: int
+) -> int {
     let batch: int = torch::tensor::size(input, 0);
     let seq_len: int = torch::tensor::size(input, 1);
-    let hidden = rms_norm(input, prefix + ".operator_norm.weight");
-    let qkv_linear = linear(hidden, prefix + ".self_attn.qkv_proj.weight");
+    let hidden = rms_norm(input, operator_norm_weights.copy()[layer]);
+    let qkv_linear = linear(hidden, qkv_weights.copy()[layer]);
     let q_linear: int = torch::tensor::narrow(qkv_linear, -1, 0, 1024);
     let k_linear: int = torch::tensor::narrow(qkv_linear, -1, 1024, 512);
     let v_linear: int = torch::tensor::narrow(qkv_linear, -1, 1536, 512);
     let q_view: int = torch::tensor::view4(q_linear, batch, seq_len, 16, 64);
     let k_view: int = torch::tensor::view4(k_linear, batch, seq_len, 8, 64);
     let v_view: int = torch::tensor::view4(v_linear, batch, seq_len, 8, 64);
-    let q_norm = rms_norm(q_view, prefix + ".self_attn.q_layernorm.weight");
-    let k_norm = rms_norm(k_view, prefix + ".self_attn.k_layernorm.weight");
+    let q_norm = rms_norm(q_view, q_norm_weights.copy()[layer]);
+    let k_norm = rms_norm(k_view, k_norm_weights.copy()[layer]);
     let q_heads: int = torch::tensor::transpose(q_norm, 1, 2);
     let k_heads: int = torch::tensor::transpose(k_norm, 1, 2);
     let v_heads: int = torch::tensor::transpose(v_view, 1, 2);
@@ -88,13 +293,13 @@ fn attention_mixer(input: int, prefix: string, incremental: bool, cos: int, sin:
         seq_len,
         1024
     );
-    linear(merged, prefix + ".self_attn.out_proj.weight")
+    linear(merged, attention_out_weights.copy()[layer])
 }
-fn conv_mixer(input: int, prefix: string, incremental: bool) -> int {
+fn conv_mixer(input: int, prefix: string, layer: int, incremental: bool) -> int {
     let seq_len: int = torch::tensor::size(input, 1);
-    let hidden = rms_norm(input, prefix + ".operator_norm.weight");
+    let hidden = rms_norm(input, operator_norm_weights.copy()[layer]);
     let projected: int = torch::tensor::transpose(
-        linear(hidden, prefix + ".conv.in_proj.weight"),
+        linear(hidden, conv_in_weights.copy()[layer]),
         -1,
         -2
     );
@@ -103,7 +308,7 @@ fn conv_mixer(input: int, prefix: string, incremental: bool) -> int {
     let x_part: int = torch::tensor::narrow(projected, 1, 2048, 1024);
     let bx: int = torch::tensor::mul(b_part, x_part);
     let state_name = prefix + ".conv.state";
-    let conv_weight = weight(prefix + ".conv.conv.weight");
+    let conv_weight: int = conv_weights.copy()[layer];
     let conv_trimmed: int = if incremental => {
         let old_state: int = torch::cache::get(state_name);
         let step_result: int = torch::nn::conv1d_step(old_state, bx, conv_weight);
@@ -129,56 +334,61 @@ fn conv_mixer(input: int, prefix: string, incremental: bool) -> int {
         -2
     );
     let mixed_contiguous: int = torch::tensor::contiguous(mixed);
-    linear(mixed_contiguous, prefix + ".conv.out_proj.weight")
+    linear(mixed_contiguous, conv_out_weights.copy()[layer])
 }
-fn mlp(input: int, prefix: string) -> int {
-    let gate_up = linear(input, prefix + ".w1_w3.weight");
-    let down_weight = weight(prefix + ".w2.weight");
+fn mlp(input: int, layer: int) -> int {
+    let gate_up = linear(input, mlp_gate_up_weights.copy()[layer]);
+    let down_weight: int = mlp_down_weights.copy()[layer];
     torch::nn::swiglu_linear(gate_up, down_weight, 0)
 }
-fn finish_layer(input: int, prefix: string, mixed: int) -> int {
-    let hidden_norm = add_rms_norm(input, mixed, prefix + ".ffn_norm.weight");
+fn finish_layer(input: int, layer: int, mixed: int) -> int {
+    let hidden_norm = add_rms_norm(input, mixed, ffn_norm_weights.copy()[layer]);
     let hidden: int = torch::pair::local(hidden_norm);
     let ffn_input: int = torch::pair::global(hidden_norm);
-    let feed_forward = mlp(ffn_input, prefix + ".feed_forward");
+    let feed_forward = mlp(ffn_input, layer);
     torch::tensor::add(hidden, feed_forward)
 }
-fn conv_layer(input: int, prefix: string, incremental: bool) -> int {
-    let mixed = conv_mixer(input, prefix, incremental);
-    finish_layer(input, prefix, mixed)
+fn conv_layer(input: int, prefix: string, layer: int, incremental: bool) -> int {
+    let mixed = conv_mixer(input, prefix, layer, incremental);
+    finish_layer(input, layer, mixed)
 }
-fn attention_layer(input: int, prefix: string, incremental: bool, cos: int, sin: int) -> int {
-    let mixed = attention_mixer(input, prefix, incremental, cos, sin);
-    finish_layer(input, prefix, mixed)
+fn attention_layer(
+    input: int,
+    prefix: string,
+    layer: int,
+    incremental: bool,
+    cos: int,
+    sin: int
+) -> int {
+    let mixed = attention_mixer(input, prefix, layer, incremental, cos, sin);
+    finish_layer(input, layer, mixed)
 }
 fn model(input_ids: int, position: int, incremental: bool) -> int {
-    let embed_weight = weight("model.embed_tokens.weight");
     let embeddings: int = torch::nn::embedding(input_ids, embed_weight);
     let seq_len: int = torch::tensor::size(input_ids, 1);
     let cos: int = torch::tensor::rope_cos_at(seq_len, 64, 1000000.0, position);
     let sin: int = torch::tensor::rope_sin_at(seq_len, 64, 1000000.0, position);
     let mut hidden = embeddings;
-    hidden = conv_layer(hidden, "model.layers.0", incremental);
-    hidden = conv_layer(hidden, "model.layers.1", incremental);
-    hidden = attention_layer(hidden, "model.layers.2", incremental, cos, sin);
-    hidden = conv_layer(hidden, "model.layers.3", incremental);
-    hidden = conv_layer(hidden, "model.layers.4", incremental);
-    hidden = attention_layer(hidden, "model.layers.5", incremental, cos, sin);
-    hidden = conv_layer(hidden, "model.layers.6", incremental);
-    hidden = conv_layer(hidden, "model.layers.7", incremental);
-    hidden = attention_layer(hidden, "model.layers.8", incremental, cos, sin);
-    hidden = conv_layer(hidden, "model.layers.9", incremental);
-    hidden = attention_layer(hidden, "model.layers.10", incremental, cos, sin);
-    hidden = conv_layer(hidden, "model.layers.11", incremental);
-    hidden = attention_layer(hidden, "model.layers.12", incremental, cos, sin);
-    hidden = conv_layer(hidden, "model.layers.13", incremental);
-    hidden = attention_layer(hidden, "model.layers.14", incremental, cos, sin);
-    hidden = conv_layer(hidden, "model.layers.15", incremental);
-    let normalized = rms_norm(hidden, "model.embedding_norm.weight");
+    hidden = conv_layer(hidden, "model.layers.0", 0, incremental);
+    hidden = conv_layer(hidden, "model.layers.1", 1, incremental);
+    hidden = attention_layer(hidden, "model.layers.2", 2, incremental, cos, sin);
+    hidden = conv_layer(hidden, "model.layers.3", 3, incremental);
+    hidden = conv_layer(hidden, "model.layers.4", 4, incremental);
+    hidden = attention_layer(hidden, "model.layers.5", 5, incremental, cos, sin);
+    hidden = conv_layer(hidden, "model.layers.6", 6, incremental);
+    hidden = conv_layer(hidden, "model.layers.7", 7, incremental);
+    hidden = attention_layer(hidden, "model.layers.8", 8, incremental, cos, sin);
+    hidden = conv_layer(hidden, "model.layers.9", 9, incremental);
+    hidden = attention_layer(hidden, "model.layers.10", 10, incremental, cos, sin);
+    hidden = conv_layer(hidden, "model.layers.11", 11, incremental);
+    hidden = attention_layer(hidden, "model.layers.12", 12, incremental, cos, sin);
+    hidden = conv_layer(hidden, "model.layers.13", 13, incremental);
+    hidden = attention_layer(hidden, "model.layers.14", 14, incremental, cos, sin);
+    hidden = conv_layer(hidden, "model.layers.15", 15, incremental);
+    let normalized = rms_norm(hidden, embedding_norm_weight);
     let seq_len: int = torch::tensor::size(normalized, 1);
     let last_hidden: int = torch::tensor::select(normalized, 1, seq_len - 1);
-    let lm_head: int = torch::weights::get_or("lm_head.weight", "model.embed_tokens.weight");
-    torch::nn::linear(last_hidden, lm_head, 0)
+    torch::nn::linear(last_hidden, lm_head_weight, 0)
 }
 let prompt_tokens: int = torch::tokenizer::encode_chat(system_prompt, source_text);
 let prompt_len: int = torch::tensor::size(prompt_tokens, 1);
