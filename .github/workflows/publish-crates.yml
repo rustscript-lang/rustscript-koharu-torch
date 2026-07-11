@@ -1,0 +1,180 @@
+name: Publish crate
+
+on:
+  push:
+    tags:
+      - 'v*'
+      - '[0-9]*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish. Defaults to the pushed tag name without leading v.'
+        required: false
+        type: string
+      pd_vm_version:
+        description: 'pd-vm and pd-host-function dependency version'
+        required: false
+        default: '0.22.5'
+        type: string
+      koharu_version:
+        description: 'koharu-runtime and koharu-torch dependency version'
+        required: false
+        default: '0.61.2'
+        type: string
+
+concurrency:
+  group: publish-crate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout Flint
+        uses: actions/checkout@v4
+        with:
+          path: flint
+
+      - name: Checkout RustScript dependencies
+        uses: actions/checkout@v4
+        with:
+          repository: rustscript-lang/rustscript
+          path: rustscript
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish flint-ai
+        working-directory: flint
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          INPUT_VERSION: ${{ inputs.version }}
+          PD_VM_VERSION: ${{ inputs.pd_vm_version || '0.22.5' }}
+          KOHARU_VERSION: ${{ inputs.koharu_version || '0.61.2' }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
+            echo "CARGO_REGISTRY_TOKEN is required" >&2
+            exit 1
+          fi
+          version="${INPUT_VERSION:-}"
+          if [[ -z "$version" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          if [[ -z "$version" ]]; then
+            echo "version is required" >&2
+            exit 1
+          fi
+          export PUBLISH_VERSION="$version"
+
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          root = Path("..").resolve()
+          flint_dir = Path.cwd().resolve()
+          dependency_versions = {
+              "koharu-runtime": os.environ["KOHARU_VERSION"],
+              "koharu-torch": os.environ["KOHARU_VERSION"],
+              "pd-host-function": os.environ["PD_VM_VERSION"],
+              "pd-vm": os.environ["PD_VM_VERSION"],
+          }
+          dependency_re = re.compile(r'^(\s*([A-Za-z0-9_-]+)\s*=\s*\{)(.*)(\}\s*)$')
+
+          for manifest in root.rglob("Cargo.toml"):
+              if ".git" in manifest.parts or "target" in manifest.parts:
+                  continue
+              manifest_version = (
+                  os.environ["PUBLISH_VERSION"]
+                  if manifest.parent.resolve() == flint_dir
+                  else os.environ["PD_VM_VERSION"]
+              )
+              section = ""
+              output = []
+              for line in manifest.read_text(encoding="utf-8").splitlines():
+                  stripped = line.strip()
+                  if stripped.startswith("[") and stripped.endswith("]"):
+                      section = stripped
+                  if section in ("[workspace.package]", "[package]") and stripped.startswith("version = "):
+                      line = re.sub(
+                          r'version\s*=\s*"[^"]*"',
+                          f'version = "{manifest_version}"',
+                          line,
+                      )
+                  match = dependency_re.match(line)
+                  if section == "[dependencies]" and match:
+                      prefix, key, body, suffix = match.groups()
+                      package_match = re.search(r'package\s*=\s*"([^"]+)"', body)
+                      dependency = package_match.group(1) if package_match else key
+                      dependency_version = dependency_versions.get(dependency)
+                      if dependency_version:
+                          if re.search(r'version\s*=\s*"[^"]*"', body):
+                              body = re.sub(
+                                  r'version\s*=\s*"[^"]*"',
+                                  f'version = "{dependency_version}"',
+                                  body,
+                              )
+                          else:
+                              body = body.rstrip()
+                              if body and not body.endswith(","):
+                                  body += ","
+                              body += f' version = "{dependency_version}"'
+                          line = prefix + body + suffix
+                  output.append(line)
+              manifest.write_text("\n".join(output) + "\n", encoding="utf-8")
+          PY
+
+          python3 - <<'PY'
+          import os
+          import subprocess
+          import sys
+          import time
+          import urllib.error
+          import urllib.request
+
+          crate = "flint-ai"
+          version = os.environ["PUBLISH_VERSION"]
+          token = os.environ["CARGO_REGISTRY_TOKEN"]
+
+          def exists():
+              request = urllib.request.Request(
+                  f"https://crates.io/api/v1/crates/{crate}/{version}",
+                  headers={"User-Agent": "flint-release-ci"},
+              )
+              try:
+                  urllib.request.urlopen(request, timeout=20).read()
+                  return True
+              except urllib.error.HTTPError as error:
+                  if error.code == 404:
+                      return False
+                  raise
+
+          if exists():
+              print(f"{crate} {version} already published; skipping")
+              raise SystemExit(0)
+
+          for attempt in range(1, 19):
+              print(f"publishing {crate} {version}, attempt {attempt}")
+              result = subprocess.run(
+                  [
+                      "cargo",
+                      "publish",
+                      "--no-verify",
+                      "--allow-dirty",
+                      "--token",
+                      token,
+                  ],
+                  text=True,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.STDOUT,
+              )
+              print(result.stdout)
+              if result.returncode == 0 or exists():
+                  break
+              if attempt == 18:
+                  sys.exit(result.returncode)
+              time.sleep(20)
+          PY
