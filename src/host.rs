@@ -1,6 +1,7 @@
+use std::cell::UnsafeCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -14,25 +15,43 @@ use vm::{
 type HostOp = fn(&mut TorchContext, &[Value]) -> VmResult<CallOutcome>;
 
 struct BoundHost {
-    context: Arc<Mutex<TorchContext>>,
+    context: Arc<TorchContextCell>,
     name: &'static str,
     op: HostOp,
 }
 
 impl HostArgsFunction for BoundHost {
     fn call(&mut self, args: &[Value]) -> VmResult<CallOutcome> {
-        let mut context = self
-            .context
-            .lock()
-            .map_err(|_| host_error("Torch host context lock is poisoned"))?;
+        let context = self.context.get();
         if context.host_op_profile_enabled {
             let started = Instant::now();
-            let outcome = (self.op)(&mut context, args);
+            let outcome = (self.op)(context, args);
             context.record_host_op(self.name, started.elapsed());
             outcome
         } else {
-            (self.op)(&mut context, args)
+            (self.op)(context, args)
         }
+    }
+}
+
+struct TorchContextCell {
+    inner: UnsafeCell<TorchContext>,
+}
+
+// `TorchHostRuntime::execution` serializes every run, so host calls for a
+// runtime cannot mutate this context concurrently.
+unsafe impl Send for TorchContextCell {}
+unsafe impl Sync for TorchContextCell {}
+
+impl TorchContextCell {
+    fn new(context: TorchContext) -> Self {
+        Self {
+            inner: UnsafeCell::new(context),
+        }
+    }
+
+    fn get(&self) -> &mut TorchContext {
+        unsafe { &mut *self.inner.get() }
     }
 }
 
@@ -226,14 +245,14 @@ impl TorchContext {
 }
 
 pub(crate) struct TorchHostRuntime {
-    context: Arc<Mutex<TorchContext>>,
+    context: Arc<TorchContextCell>,
     execution: Mutex<()>,
 }
 
 impl TorchHostRuntime {
     pub(crate) fn new(device: Device) -> Self {
         Self {
-            context: Arc::new(Mutex::new(TorchContext {
+            context: Arc::new(TorchContextCell::new(TorchContext {
                 device,
                 weights: HashMap::new(),
                 weight_handles: HashMap::new(),
@@ -274,14 +293,14 @@ impl TorchHostRuntime {
             .execution
             .lock()
             .map_err(|_| anyhow!("Torch execution lock is poisoned"))?;
-        self.lock()?.begin(image, mask, args);
+        self.context.get().begin(image, mask, args);
         let mut vm = Vm::new_shared_with_jit_config(program, torch_jit_config());
         self.bind(&mut vm);
         let status = koharu_torch::no_grad(|| vm.run()).map_err(|err| anyhow!(err.to_string()))?;
         if status != VmStatus::Halted {
             bail!("RustScript did not halt: {status:?}");
         }
-        self.lock()?.finish()
+        self.context.get().finish()
     }
 
     pub(crate) fn run_text(
@@ -293,20 +312,14 @@ impl TorchHostRuntime {
             .execution
             .lock()
             .map_err(|_| anyhow!("Torch execution lock is poisoned"))?;
-        self.lock()?.begin_args(args);
+        self.context.get().begin_args(args);
         let mut vm = Vm::new_shared_with_jit_config(program, torch_jit_config());
         self.bind(&mut vm);
         let status = koharu_torch::no_grad(|| vm.run()).map_err(|err| anyhow!(err.to_string()))?;
         if status != VmStatus::Halted {
             bail!("RustScript did not halt: {status:?}");
         }
-        Ok(self.lock()?.finish_text())
-    }
-
-    fn lock(&self) -> Result<MutexGuard<'_, TorchContext>> {
-        self.context
-            .lock()
-            .map_err(|_| anyhow!("Torch host context lock is poisoned"))
+        Ok(self.context.get().finish_text())
     }
 
     fn bind(&self, vm: &mut Vm) {
