@@ -51,6 +51,16 @@ imported as `flint_ai`.
 repository checkout so the referenced files under `scripts/` are available;
 `--script` also accepts an absolute path to an RSS program.
 
+## Release Archives
+
+Release assets are zip archives containing the runner and its native Koharu
+shims. LibTorch, llama.cpp, and stable-diffusion.cpp are fetched by
+`koharu-runtime` on first use and stored next to the executable under `store`.
+The `macos-arm64` runner uses Apple Silicon LibTorch with its MPS backend,
+which uses Metal; run Torch scripts with `--device mps`. The `windows-x86_64`
+runner is built against CUDA 13 LibTorch; with a compatible NVIDIA driver,
+Torch scripts can use `--device cuda` or `--device cuda:N`.
+
 ## CLI
 
 The `flint` binary has explicit modes:

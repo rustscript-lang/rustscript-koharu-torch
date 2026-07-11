@@ -29,6 +29,60 @@ def koharu_enums_path() -> Path:
     return Path(matches[0]["manifest_path"]).parent / "src" / "enums.rs"
 
 
+def koharu_libtorch_path() -> Path:
+    metadata = subprocess.run(
+        ["cargo", "metadata", "--locked", "--format-version", "1"],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+    packages = json.loads(metadata.stdout)["packages"]
+    matches = [
+        package
+        for package in packages
+        if package["name"] == "koharu-runtime"
+        and package["source"].startswith("git+")
+    ]
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"expected one Git koharu-runtime package, found {len(matches)}"
+        )
+    return Path(matches[0]["manifest_path"]).parent / "src" / "package" / "libtorch.rs"
+
+
+def patch_libtorch_selection() -> None:
+    libtorch_path = koharu_libtorch_path()
+    libtorch_source = libtorch_path.read_text(encoding="utf-8")
+    libtorch_marker = "// Patched by Flint: allow release CI to select a LibTorch device."
+    if libtorch_marker in libtorch_source:
+        print(f"already patched {libtorch_path}")
+        return
+
+    libtorch_old = "    pub fn for_current_target() -> Result<Self> {\n"
+    libtorch_new = libtorch_old + f"""        {libtorch_marker}
+        if let Some(device) = std::env::var_os("FLINT_LIBTORCH_DEVICE") {{
+            match device.to_str() {{
+                Some("cpu") => return Ok(Self::Cpu),
+                Some("cu126") => return Ok(Self::Cuda126),
+                Some("cu129") => return Ok(Self::Cuda129),
+                Some("cu130") => return Ok(Self::Cuda130),
+                Some(device) => bail!("unsupported FLINT_LIBTORCH_DEVICE '{{device}}'"),
+                None => bail!("FLINT_LIBTORCH_DEVICE is not valid UTF-8"),
+            }}
+        }}
+"""
+    if libtorch_source.count(libtorch_old) != 1:
+        raise RuntimeError("could not locate Koharu LibTorch target selection")
+    libtorch_path.write_text(
+        libtorch_source.replace(libtorch_old, libtorch_new), encoding="utf-8"
+    )
+    print(f"patched {libtorch_path}")
+
+
+patch_libtorch_selection()
+
+
 path = koharu_enums_path()
 source = path.read_text(encoding="utf-8")
 

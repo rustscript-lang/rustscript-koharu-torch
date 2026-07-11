@@ -21,6 +21,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_TARGET_DIR: target
+  LIBTORCH_VERSION: "2.12.1"
 
 jobs:
   build-runner:
@@ -33,12 +34,15 @@ jobs:
           - os: ubuntu-latest
             platform: linux-x86_64
             exe_suffix: ""
+            libtorch_device: cpu
           - os: windows-latest
             platform: windows-x86_64
             exe_suffix: ".exe"
+            libtorch_device: cu130
           - os: macos-14
             platform: macos-arm64
             exe_suffix: ""
+            libtorch_device: cpu
 
     steps:
       - name: Checkout Flint
@@ -55,12 +59,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Patch Koharu C enum ABI compatibility
+      - name: Patch Koharu release dependencies
         working-directory: flint
         run: python .github/scripts/patch-koharu-diffusion.py
 
-      - name: Preload Unix LibTorch
-        if: runner.os != 'Windows'
+      - name: Prefetch platform LibTorch
         working-directory: flint
         shell: python
         env:
@@ -73,19 +76,55 @@ jobs:
           import urllib.request
           import zipfile
 
-          version = "2.12.1"
+          version = os.environ["LIBTORCH_VERSION"]
           runner_os = os.environ["RUNNER_OS"]
           if runner_os == "Linux":
+              device = "cpu"
               archive_name = f"libtorch-shared-with-deps-{version}%2Bcpu.zip"
-              required = ("libc10.so", "libtorch_cpu.so", "libtorch.so")
+              required = (
+                  "libgomp.so.1",
+                  "libc10.so",
+                  "libshm.so",
+                  "libtorch_global_deps.so",
+                  "libtorch_cpu.so",
+                  "libtorch.so",
+              )
           elif runner_os == "macOS":
+              # Apple Silicon LibTorch includes the MPS backend implemented on Metal.
+              device = "cpu"
               archive_name = f"libtorch-macos-arm64-{version}.zip"
-              required = ("libomp.dylib", "libc10.dylib", "libtorch_cpu.dylib", "libtorch.dylib")
+              required = (
+                  "libomp.dylib",
+                  "libc10.dylib",
+                  "libshm.dylib",
+                  "libtorch_global_deps.dylib",
+                  "libtorch_cpu.dylib",
+                  "libtorch.dylib",
+              )
+          elif runner_os == "Windows":
+              # GitHub's Windows runner has no CUDA driver. Prefetch CUDA LibTorch
+              # explicitly so the released archive can use CUDA on a user's machine.
+              device = "cu130"
+              archive_name = f"libtorch-win-shared-with-deps-{version}%2B{device}.zip"
+              required = (
+                  "libiomp5md.dll",
+                  "libiompstubs5md.dll",
+                  "zlibwapi.dll",
+                  "uv.dll",
+                  "c10.dll",
+                  "c10_cuda.dll",
+                  "caffe2_nvrtc.dll",
+                  "torch_global_deps.dll",
+                  "torch_cpu.dll",
+                  "torch_cuda.dll",
+                  "shm.dll",
+                  "torch.dll",
+              )
           else:
               raise RuntimeError(f"unsupported runner OS: {runner_os}")
-          url = f"https://download.pytorch.org/libtorch/cpu/{archive_name}"
+          url = f"https://download.pytorch.org/libtorch/{device}/{archive_name}"
           target_dir = pathlib.Path(os.environ.get("CARGO_TARGET_DIR", "target"))
-          package_dir = target_dir / "store" / "libtorch" / version / "cpu"
+          package_dir = target_dir / "store" / "libtorch" / version / device
           lib_dir = package_dir / "libtorch" / "lib"
 
           if all((lib_dir / name).is_file() for name in required):
@@ -128,6 +167,8 @@ jobs:
 
       - name: Build release runner
         working-directory: flint
+        env:
+          FLINT_LIBTORCH_DEVICE: ${{ matrix.libtorch_device }}
         run: cargo build --release --locked --bin flint
 
       - name: Package runner
@@ -136,6 +177,8 @@ jobs:
         env:
           PLATFORM: ${{ matrix.platform }}
           EXE_SUFFIX: ${{ matrix.exe_suffix }}
+          RUNNER_OS: ${{ runner.os }}
+          LIBTORCH_VERSION: ${{ env.LIBTORCH_VERSION }}
         run: |
           import os
           import pathlib
@@ -161,13 +204,40 @@ jobs:
               raise FileNotFoundError(f"missing built runner binary: {binary}")
           shutil.copy2(binary, package_dir / binary.name)
 
+          native_library_patterns = {
+              "Windows": "koharu*.dll",
+              "macOS": "libkoharu*.dylib",
+              "Linux": "libkoharu*.so",
+          }
+          pattern = native_library_patterns[os.environ["RUNNER_OS"]]
+          for source in release_dir.glob(pattern):
+              shutil.copy2(source, package_dir / source.name)
+
           for extra in ("README.md", "LICENSE"):
               source = root / extra
               if source.exists():
                   shutil.copy2(source, package_dir / extra)
 
+          platform = os.environ["PLATFORM"]
+          if platform == "windows-x86_64":
+              required = (
+                  "flint.exe",
+                  "koharu-torch.dll",
+              )
+          elif platform == "macos-arm64":
+              required = (
+                  "flint",
+                  "libkoharu-torch.dylib",
+              )
+          else:
+              required = ("flint", "libkoharu-torch.so")
+          missing = [name for name in required if not (package_dir / name).is_file()]
+          if missing:
+              raise RuntimeError(f"release package is missing: {', '.join(missing)}")
+
+          all_files = sorted(path for path in package_dir.rglob("*") if path.is_file())
           with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-              for path in package_dir.rglob("*"):
+              for path in all_files:
                   zf.write(path, path.relative_to(package_dir.parent))
 
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
