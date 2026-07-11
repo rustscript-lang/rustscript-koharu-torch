@@ -73,6 +73,8 @@ struct TorchContext {
     text_output: Option<String>,
     generation_started_at: Option<Instant>,
     generated_tokens: Option<i64>,
+    decode_started_at: Option<Instant>,
+    decode_tokens: Option<i64>,
     generated_token_tensors: Vec<Tensor>,
     host_op_profile_enabled: bool,
     host_op_stats: HashMap<&'static str, HostOpStats>,
@@ -138,6 +140,8 @@ impl TorchContext {
         self.text_output = None;
         self.generation_started_at = None;
         self.generated_tokens = None;
+        self.decode_started_at = None;
+        self.decode_tokens = None;
         self.generated_token_tensors.clear();
         self.host_op_stats.clear();
         self.args = args;
@@ -187,6 +191,8 @@ impl TorchContext {
         self.text_output = None;
         self.generation_started_at = None;
         self.generated_tokens = None;
+        self.decode_started_at = None;
+        self.decode_tokens = None;
         self.print_host_op_stats();
         Ok(output)
     }
@@ -198,6 +204,8 @@ impl TorchContext {
             .take()
             .map(|start| start.elapsed());
         let generated_tokens = self.generated_tokens.take();
+        let decode_elapsed = self.decode_started_at.take().map(|start| start.elapsed());
+        let decode_tokens = self.decode_tokens.take();
         self.tensors.clear();
         self.pairs.clear();
         self.inputs.clear();
@@ -211,6 +219,8 @@ impl TorchContext {
             text,
             generated_tokens,
             elapsed,
+            decode_tokens,
+            decode_elapsed,
         }
     }
 }
@@ -241,6 +251,8 @@ impl TorchHostRuntime {
                 text_output: None,
                 generation_started_at: None,
                 generated_tokens: None,
+                decode_started_at: None,
+                decode_tokens: None,
                 generated_token_tensors: Vec::new(),
                 host_op_profile_enabled: std::env::var_os("KOHARU_TORCH_PROFILE_OPS").is_some(),
                 host_op_stats: HashMap::new(),
@@ -327,6 +339,8 @@ pub struct ScriptTextOutput {
     pub text: String,
     pub generated_tokens: Option<i64>,
     pub elapsed: Option<Duration>,
+    pub decode_tokens: Option<i64>,
+    pub decode_elapsed: Option<Duration>,
 }
 
 impl TorchScriptRunner {
@@ -352,7 +366,15 @@ const HOST_OPS: &[(&str, HostOp)] = &[
     ("torch::runtime::set_output", runtime_set_output),
     ("torch::runtime::set_text_output", runtime_set_text_output),
     ("torch::runtime::start_timer", runtime_start_timer),
+    (
+        "torch::runtime::start_decode_timer",
+        runtime_start_decode_timer,
+    ),
     ("torch::runtime::set_token_count", runtime_set_token_count),
+    (
+        "torch::runtime::set_decode_token_count",
+        runtime_set_decode_token_count,
+    ),
     ("torch::runtime::compact2", runtime_compact2),
     ("torch::cache::clear", cache_clear),
     ("torch::cache::has", cache_has),
@@ -685,7 +707,18 @@ fn runtime_start_timer(context: &mut TorchContext, args: &[Value]) -> VmResult<C
     }
     context.generation_started_at = Some(Instant::now());
     context.generated_tokens = None;
+    context.decode_started_at = None;
+    context.decode_tokens = None;
     context.generated_token_tensors.clear();
+    return_value(Value::Bool(true))
+}
+
+fn runtime_start_decode_timer(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    if !args.is_empty() {
+        return Err(host_error("start_decode_timer takes no arguments"));
+    }
+    context.decode_started_at = Some(Instant::now());
+    context.decode_tokens = None;
     return_value(Value::Bool(true))
 }
 
@@ -695,6 +728,18 @@ fn runtime_set_token_count(context: &mut TorchContext, args: &[Value]) -> VmResu
         return Err(host_error("generated token count must be non-negative"));
     }
     context.generated_tokens = Some(generated_tokens);
+    return_value(Value::Bool(true))
+}
+
+fn runtime_set_decode_token_count(
+    context: &mut TorchContext,
+    args: &[Value],
+) -> VmResult<CallOutcome> {
+    let decode_tokens = int_arg(args, 0, "decode tokens")?;
+    if decode_tokens < 0 {
+        return Err(host_error("decode token count must be non-negative"));
+    }
+    context.decode_tokens = Some(decode_tokens);
     return_value(Value::Bool(true))
 }
 

@@ -242,6 +242,7 @@ let prompt_len: int = torch::tensor::size(prompt_tokens, 1);
 let mut tokens: int = prompt_tokens;
 let mut step = 0;
 let mut generated_tokens = 0;
+let mut decode_started = false;
 torch::cache::clear();
 torch::runtime::start_timer();
 torch::tokenizer::clear_generated_tokens();
@@ -260,6 +261,10 @@ if ignore_eos == 0 {
         if step < max_new_tokens {
             let decode_input: int = torch::tokenizer::single_token(next_token);
             let decode_position: int = prompt_len + generated_tokens - 1;
+            if !decode_started {
+                torch::runtime::start_decode_timer();
+                decode_started = true;
+            }
             logits = model(decode_input, decode_position, true);
             torch::runtime::compact2(logits, tokens);
         }
@@ -272,6 +277,10 @@ if ignore_eos == 0 {
         step = step + 1;
         if step < max_new_tokens {
             let decode_position: int = prompt_len + generated_tokens - 1;
+            if !decode_started {
+                torch::runtime::start_decode_timer();
+                decode_started = true;
+            }
             logits = model(next_token, decode_position, true);
             torch::runtime::compact2(logits, tokens);
         }
@@ -283,5 +292,11 @@ let output_text: string = if ignore_eos == 0 => {
 } else => {
     torch::tokenizer::decode_generated_tokens()
 };
+let decode_tokens: int = if generated_tokens > 0 => {
+    generated_tokens - 1
+} else => {
+    0
+};
 torch::runtime::set_token_count(generated_tokens);
+torch::runtime::set_decode_token_count(decode_tokens);
 torch::runtime::set_text_output(output_text);

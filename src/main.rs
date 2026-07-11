@@ -35,7 +35,17 @@ async fn main() -> Result<()> {
     if let (Some(tokens), Some(elapsed)) = (output.generated_tokens, output.elapsed) {
         let seconds = elapsed.as_secs_f64();
         if tokens > 0 && seconds > 0.0 {
-            println!("tokens/s: {:.2}", tokens as f64 / seconds);
+            if output.decode_tokens.is_some() && output.decode_elapsed.is_some() {
+                println!("tokens/s total: {:.2}", tokens as f64 / seconds);
+            } else {
+                println!("tokens/s: {:.2}", tokens as f64 / seconds);
+            }
+        }
+    }
+    if let (Some(tokens), Some(elapsed)) = (output.decode_tokens, output.decode_elapsed) {
+        let seconds = elapsed.as_secs_f64();
+        if tokens > 0 && seconds > 0.0 {
+            println!("tokens/s decode: {:.2}", tokens as f64 / seconds);
         }
     }
     Ok(())
