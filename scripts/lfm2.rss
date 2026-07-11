@@ -42,6 +42,10 @@ fn apply_rope(input: int, cos: int, sin: int) -> int {
     torch::nn::apply_rope(input, cos, sin)
 }
 
+fn apply_rope_pair(query: int, key: int, cos: int, sin: int) -> int {
+    torch::nn::apply_rope_pair(query, key, cos, sin)
+}
+
 fn repeat_kv(input: int) -> int {
     torch::tensor::repeat_interleave(input, 2, 1)
 }
@@ -67,8 +71,9 @@ fn attention_mixer(input: int, prefix: string, incremental: bool, cos: int, sin:
     let k_heads: int = torch::tensor::transpose(k_norm, 1, 2);
     let v_heads: int = torch::tensor::transpose(v_view, 1, 2);
 
-    let q_rot: int = apply_rope(q_heads, cos, sin);
-    let k_rot: int = apply_rope(k_heads, cos, sin);
+    let qk_rot: int = apply_rope_pair(q_heads, k_heads, cos, sin);
+    let q_rot: int = torch::pair::local(qk_rot);
+    let k_rot: int = torch::pair::global(qk_rot);
 
     let k_cache_name = prefix + ".self_attn.k_cache";
     let v_cache_name = prefix + ".self_attn.v_cache";

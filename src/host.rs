@@ -436,6 +436,7 @@ const HOST_OPS: &[(&str, HostOp)] = &[
     ("torch::nn::rms_norm", nn_rms_norm),
     ("torch::nn::add_rms_norm", nn_add_rms_norm),
     ("torch::nn::apply_rope", nn_apply_rope),
+    ("torch::nn::apply_rope_pair", nn_apply_rope_pair),
     (
         "torch::nn::scaled_dot_product_attention",
         nn_scaled_dot_product_attention,
@@ -1502,6 +1503,38 @@ fn nn_apply_rope(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOut
     let input = context.tensor(int_arg(args, 0, "tensor")?)?.shallow_clone();
     let cos = context.tensor(int_arg(args, 1, "cos")?)?.shallow_clone();
     let sin = context.tensor(int_arg(args, 2, "sin")?)?.shallow_clone();
+    let output = apply_rope_tensor(input, &cos, &sin)?;
+    return_tensor(context, output)
+}
+
+fn nn_apply_rope_pair(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let query = context.tensor(int_arg(args, 0, "query")?)?.shallow_clone();
+    let key = context.tensor(int_arg(args, 1, "key")?)?.shallow_clone();
+    let cos = context.tensor(int_arg(args, 2, "cos")?)?.shallow_clone();
+    let sin = context.tensor(int_arg(args, 3, "sin")?)?.shallow_clone();
+    let query_heads = query
+        .size()
+        .get(1)
+        .copied()
+        .ok_or_else(|| host_error("query must have at least 2 dimensions"))?;
+    let key_heads = key
+        .size()
+        .get(1)
+        .copied()
+        .ok_or_else(|| host_error("key must have at least 2 dimensions"))?;
+    let joined = Tensor::cat(&[&query, &key], 1);
+    let rotated = apply_rope_tensor(joined, &cos, &sin)?;
+    let query = rotated.narrow(1, 0, query_heads);
+    let key = rotated.narrow(1, query_heads, key_heads);
+    let query = context.insert_tensor(query);
+    let key = context.insert_tensor(key);
+    return_int(context.insert_pair(FfcPair {
+        local: query,
+        global: key,
+    }))
+}
+
+fn apply_rope_tensor(input: Tensor, cos: &Tensor, sin: &Tensor) -> VmResult<Tensor> {
     let Some(&head_dim) = input.size().last() else {
         return Err(host_error("input must have at least one dimension"));
     };
@@ -1510,7 +1543,7 @@ fn nn_apply_rope(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOut
     let second = input.narrow(-1, half, half);
     let rotated = Tensor::cat(&[&second.neg(), &first], -1);
     let output = input * cos + rotated * sin;
-    return_tensor(context, output)
+    Ok(output)
 }
 
 fn nn_scaled_dot_product_attention(
