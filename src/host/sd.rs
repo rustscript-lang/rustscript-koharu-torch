@@ -17,6 +17,11 @@ use crate::{CallOutcome, Value, VmResult};
 
 use super::{ggml, host_error, return_int, return_value};
 
+#[cfg(target_env = "msvc")]
+type SamplerEnumRepr = i32;
+#[cfg(not(target_env = "msvc"))]
+type SamplerEnumRepr = u32;
+
 static NEXT_SD_HANDLE: AtomicI64 = AtomicI64::new(1);
 static SD_CTX_PARAMS_HANDLES: LazyLock<Mutex<HashMap<i64, PendingContextParams>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -304,10 +309,11 @@ pub(super) fn sd_img_gen_params_set_sampler_impl(
     sample_method: i64,
     scheduler: i64,
 ) -> VmResult<CallOutcome> {
-    let sample_method = SampleMethod::try_from(checked_i32(sample_method, "sample_method")? as _)
+    let sample_method =
+        SampleMethod::try_from(checked_i32(sample_method, "sample_method")? as SamplerEnumRepr)
+            .map_err(diffusion_error)?;
+    let scheduler = Scheduler::try_from(checked_i32(scheduler, "scheduler")? as SamplerEnumRepr)
         .map_err(diffusion_error)?;
-    let scheduler =
-        Scheduler::try_from(checked_i32(scheduler, "scheduler")? as _).map_err(diffusion_error)?;
     let mut handles = SD_IMG_PARAMS_HANDLES
         .lock()
         .map_err(|_| registry_error("image parameter"))?;
@@ -338,16 +344,17 @@ pub(super) fn sd_str_to_scheduler_impl(name: &str) -> VmResult<CallOutcome> {
 /// Converts a sample method enum value to its name.
 #[pd_host_function(name = "flint::sd::sample_method_name")]
 pub(super) fn sd_sample_method_name_impl(sample_method: i64) -> VmResult<CallOutcome> {
-    let value = SampleMethod::try_from(checked_i32(sample_method, "sample_method")? as _)
-        .map_err(diffusion_error)?;
+    let value =
+        SampleMethod::try_from(checked_i32(sample_method, "sample_method")? as SamplerEnumRepr)
+            .map_err(diffusion_error)?;
     return_value(Value::String(value.as_str().to_owned().into()))
 }
 
 /// Converts a scheduler enum value to its name.
 #[pd_host_function(name = "flint::sd::scheduler_name")]
 pub(super) fn sd_scheduler_name_impl(scheduler: i64) -> VmResult<CallOutcome> {
-    let value =
-        Scheduler::try_from(checked_i32(scheduler, "scheduler")? as _).map_err(diffusion_error)?;
+    let value = Scheduler::try_from(checked_i32(scheduler, "scheduler")? as SamplerEnumRepr)
+        .map_err(diffusion_error)?;
     return_value(Value::String(value.as_str().to_owned().into()))
 }
 
@@ -370,8 +377,9 @@ pub(super) fn sd_get_default_scheduler_impl(
     ctx_handle: i64,
     sample_method: i64,
 ) -> VmResult<CallOutcome> {
-    let sample_method = SampleMethod::try_from(checked_i32(sample_method, "sample_method")? as _)
-        .map_err(diffusion_error)?;
+    let sample_method =
+        SampleMethod::try_from(checked_i32(sample_method, "sample_method")? as SamplerEnumRepr)
+            .map_err(diffusion_error)?;
     let handles = SD_CTX_HANDLES
         .lock()
         .map_err(|_| registry_error("context"))?;
