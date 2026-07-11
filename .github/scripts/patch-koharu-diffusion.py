@@ -51,6 +51,28 @@ def koharu_libtorch_path() -> Path:
     return Path(matches[0]["manifest_path"]).parent / "src" / "package" / "libtorch.rs"
 
 
+def koharu_llama_build_path() -> Path:
+    metadata = subprocess.run(
+        ["cargo", "metadata", "--locked", "--format-version", "1"],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+    packages = json.loads(metadata.stdout)["packages"]
+    matches = [
+        package
+        for package in packages
+        if package["name"] == "koharu-llama-sys"
+        and package["source"].startswith("git+")
+    ]
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"expected one Git koharu-llama-sys package, found {len(matches)}"
+        )
+    return Path(matches[0]["manifest_path"]).parent / "build.rs"
+
+
 def patch_libtorch_selection() -> None:
     libtorch_path = koharu_libtorch_path()
     libtorch_source = libtorch_path.read_text(encoding="utf-8")
@@ -80,7 +102,82 @@ def patch_libtorch_selection() -> None:
     print(f"patched {libtorch_path}")
 
 
+def patch_llama_windows_cmake_paths() -> None:
+    build_path = koharu_llama_build_path()
+    build_source = build_path.read_text(encoding="utf-8")
+    marker = "// Patched by Flint: normalize CMake paths on Windows."
+    if marker in build_source:
+        print(f"already patched {build_path}")
+        return
+
+    old = """fn build_shim(manifest_dir: &Path) -> Result<()> {
+    let target_dir = output_dir()?;
+    fs::create_dir_all(&target_dir)?;
+
+    let cmake_dir = cmake::Config::new(\"shim\")
+        .define(
+            \"KOHARU_LLAMA_COMMON_SHIM_SOURCE\",
+            manifest_dir.join(\"shim/common.cpp\"),
+        )
+        .define(
+            \"KOHARU_LLAMA_JSON_SCHEMA_SOURCE\",
+            manifest_dir.join(\"common/json-schema-to-grammar.cpp\"),
+        )
+        .define(
+            \"KOHARU_LLAMA_COMMON_SUPPORT_SOURCE\",
+            manifest_dir.join(\"common/common_support.cpp\"),
+        )
+        .define(\"KOHARU_LLAMA_ROOT_DIR\", manifest_dir)
+        .define(\"KOHARU_LLAMA_INCLUDE_DIR\", manifest_dir.join(\"include\"))
+        .define(\"KOHARU_LLAMA_COMMON_DIR\", manifest_dir.join(\"common\"))
+        .define(\"KOHARU_LLAMA_VENDOR_DIR\", manifest_dir.join(\"vendor\"))
+        .build();
+"""
+    new = """// Patched by Flint: normalize CMake paths on Windows.
+fn cmake_path(path: impl AsRef<Path>) -> String {
+    path.as_ref().to_string_lossy().replace('\\\\', \"/\")
+}
+
+fn build_shim(manifest_dir: &Path) -> Result<()> {
+    let target_dir = output_dir()?;
+    fs::create_dir_all(&target_dir)?;
+
+    let cmake_dir = cmake::Config::new(\"shim\")
+        .define(
+            \"KOHARU_LLAMA_COMMON_SHIM_SOURCE\",
+            cmake_path(manifest_dir.join(\"shim/common.cpp\")),
+        )
+        .define(
+            \"KOHARU_LLAMA_JSON_SCHEMA_SOURCE\",
+            cmake_path(manifest_dir.join(\"common/json-schema-to-grammar.cpp\")),
+        )
+        .define(
+            \"KOHARU_LLAMA_COMMON_SUPPORT_SOURCE\",
+            cmake_path(manifest_dir.join(\"common/common_support.cpp\")),
+        )
+        .define(\"KOHARU_LLAMA_ROOT_DIR\", cmake_path(manifest_dir))
+        .define(
+            \"KOHARU_LLAMA_INCLUDE_DIR\",
+            cmake_path(manifest_dir.join(\"include\")),
+        )
+        .define(
+            \"KOHARU_LLAMA_COMMON_DIR\",
+            cmake_path(manifest_dir.join(\"common\")),
+        )
+        .define(
+            \"KOHARU_LLAMA_VENDOR_DIR\",
+            cmake_path(manifest_dir.join(\"vendor\")),
+        )
+        .build();
+"""
+    if build_source.count(old) != 1:
+        raise RuntimeError("could not locate Koharu llama CMake configuration")
+    build_path.write_text(build_source.replace(old, new), encoding="utf-8")
+    print(f"patched {build_path}")
+
+
 patch_libtorch_selection()
+patch_llama_windows_cmake_paths()
 
 
 path = koharu_enums_path()
