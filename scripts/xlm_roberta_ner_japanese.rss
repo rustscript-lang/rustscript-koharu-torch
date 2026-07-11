@@ -3,7 +3,7 @@ use flint;
 let weights_path: string = flint::runtime::arg(0);
 let tokenizer_path: string = flint::runtime::arg(1);
 let text: string = flint::runtime::arg(2);
-let max_len: int = flint::runtime::arg_int_or(3, 128);
+let seq_len: int = flint::runtime::arg_int_or(3, 128);
 let label_names: string = flint::runtime::arg_or(4, "O,PER,ORG,ORG-P,ORG-O,LOC,INS,PRD,EVT");
 
 flint::weights::load(weights_path);
@@ -25,7 +25,7 @@ fn layer_norm(input: int, weight_handle: int, bias_handle: int) -> int {
     flint::nn::layer_norm(input, weight_handle, bias_handle, 0.00001, 768)
 }
 
-fn roberta_attention(input: int, padding_mask: int, layer: int) -> int {
+fn roberta_attention(input: int, padding_mask: int, layer: int, seq_len_value: int) -> int {
     let query: int = linear(
         input,
         layer_weight(layer, ".attention.self.query.weight"),
@@ -43,17 +43,17 @@ fn roberta_attention(input: int, padding_mask: int, layer: int) -> int {
     );
 
     let query_heads: int = flint::tensor::transpose(
-        flint::tensor::view4(query, 1, max_len, 12, 64),
+        flint::tensor::view4(query, 1, seq_len_value, 12, 64),
         1,
         2
     );
     let key_heads: int = flint::tensor::transpose(
-        flint::tensor::view4(key, 1, max_len, 12, 64),
+        flint::tensor::view4(key, 1, seq_len_value, 12, 64),
         1,
         2
     );
     let value_heads: int = flint::tensor::transpose(
-        flint::tensor::view4(value, 1, max_len, 12, 64),
+        flint::tensor::view4(value, 1, seq_len_value, 12, 64),
         1,
         2
     );
@@ -66,13 +66,13 @@ fn roberta_attention(input: int, padding_mask: int, layer: int) -> int {
     flint::tensor::view3(
         flint::tensor::contiguous(flint::tensor::transpose(attended, 1, 2)),
         1,
-        max_len,
+        seq_len_value,
         768
     )
 }
 
-fn roberta_layer(input: int, padding_mask: int, layer: int) -> int {
-    let attention_context: int = roberta_attention(input, padding_mask, layer);
+fn roberta_layer(input: int, padding_mask: int, layer: int, seq_len_value: int) -> int {
+    let attention_context: int = roberta_attention(input, padding_mask, layer, seq_len_value);
     let attention_output: int = linear(
         attention_context,
         layer_weight(layer, ".attention.output.dense.weight"),
@@ -106,14 +106,14 @@ fn roberta_layer(input: int, padding_mask: int, layer: int) -> int {
     )
 }
 
-let encoded: int = flint::tokenizer::encode_padded(text, max_len, 1, true);
+let encoded: int = flint::tokenizer::encode_padded(text, seq_len, 1, true);
 let input_ids: int = flint::pair::local(encoded);
 let attention_mask: int = flint::pair::global(encoded);
-let token_type_ids: int = flint::tensor::zeros_like(input_ids);
+let token_type_ids: int = flint::tensor::zeros_like_int(input_ids);
 let position_ids: int = flint::tensor::view2(
-    flint::tensor::add_scalar(flint::tensor::arange(max_len), 2.0),
+    flint::tensor::arange_start(2, seq_len + 2),
     1,
-    max_len
+    seq_len
 );
 
 let word_embeddings: int = flint::nn::embedding(
@@ -142,7 +142,7 @@ let padding_mask: int = flint::tensor::padding_mask(attention_mask);
 let mut layer: int = 0;
 let mut hidden: int = mut_hidden;
 while layer < 12 {
-    hidden = roberta_layer(hidden, padding_mask, layer);
+    hidden = roberta_layer(hidden, padding_mask, layer, seq_len);
     layer = layer + 1;
 }
 

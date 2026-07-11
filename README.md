@@ -217,7 +217,9 @@ flint::tensor::to_float
 flint::tensor::to_bfloat16
 flint::tensor::ones_like
 flint::tensor::zeros_like
+flint::tensor::zeros_like_int
 flint::tensor::arange
+flint::tensor::arange_start
 flint::tensor::causal_mask
 flint::tensor::causal_padding_mask
 flint::tensor::padding_mask

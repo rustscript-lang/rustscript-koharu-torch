@@ -704,7 +704,15 @@ const HOST_OPS: &[(&str, HostOp)] = &[
         "flint::tensor::zeros_like",
         HostOp::Context(tensor_zeros_like),
     ),
+    (
+        "flint::tensor::zeros_like_int",
+        HostOp::Context(tensor_zeros_like_int),
+    ),
     ("flint::tensor::arange", HostOp::Context(tensor_arange)),
+    (
+        "flint::tensor::arange_start",
+        HostOp::Context(tensor_arange_start),
+    ),
     (
         "flint::tensor::causal_mask",
         HostOp::Context(tensor_causal_mask),
@@ -1557,9 +1565,22 @@ fn tensor_zeros_like(context: &mut TorchContext, args: &[Value]) -> VmResult<Cal
     unary_tensor(context, args, Tensor::zeros_like)
 }
 
+fn tensor_zeros_like_int(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?;
+    let output = Tensor::zeros(input.size(), (Kind::Int64, context.device));
+    return_tensor(context, output)
+}
+
 fn tensor_arange(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
     let end = int_arg(args, 0, "end")?;
     let output = Tensor::arange(end, (Kind::Int64, context.device));
+    return_tensor(context, output)
+}
+
+fn tensor_arange_start(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let start = int_arg(args, 0, "start")?;
+    let end = int_arg(args, 1, "end")?;
+    let output = Tensor::arange_start(start, end, (Kind::Int64, context.device));
     return_tensor(context, output)
 }
 
