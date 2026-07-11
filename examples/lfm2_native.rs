@@ -411,12 +411,9 @@ impl Lfm2Native {
 
     fn rms_norm(&self, input: Tensor, weight_name: &str) -> Result<Tensor> {
         let scale_weight = self.weight(weight_name)?;
-        let fp32 = input.to_kind(Kind::Float);
-        let variance = fp32
-            .pow_tensor_scalar(2.0)
-            .mean_dim(&[-1][..], true, Kind::Float);
-        let normalized = (fp32 * (variance + 0.00001).rsqrt()).to_kind(Kind::BFloat16);
-        Ok(normalized * scale_weight)
+        Ok(input
+            .internal_fused_rms_norm(scale_weight.size(), Some(scale_weight), 0.00001)
+            .0)
     }
 
     fn linear(&self, input: Tensor, weight_name: &str) -> Result<Tensor> {

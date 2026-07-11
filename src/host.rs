@@ -15,6 +15,7 @@ type HostOp = fn(&mut TorchContext, &[Value]) -> VmResult<CallOutcome>;
 
 struct BoundHost {
     context: Arc<Mutex<TorchContext>>,
+    name: &'static str,
     op: HostOp,
 }
 
@@ -24,7 +25,14 @@ impl HostArgsFunction for BoundHost {
             .context
             .lock()
             .map_err(|_| host_error("Torch host context lock is poisoned"))?;
-        (self.op)(&mut context, args)
+        if context.host_op_profile_enabled {
+            let started = Instant::now();
+            let outcome = (self.op)(&mut context, args);
+            context.record_host_op(self.name, started.elapsed());
+            outcome
+        } else {
+            (self.op)(&mut context, args)
+        }
     }
 }
 
@@ -64,8 +72,16 @@ struct TorchContext {
     text_output: Option<String>,
     generation_started_at: Option<Instant>,
     generated_tokens: Option<i64>,
+    host_op_profile_enabled: bool,
+    host_op_stats: HashMap<&'static str, HostOpStats>,
     next_tensor: i64,
     next_pair: i64,
+}
+
+#[derive(Default)]
+struct HostOpStats {
+    count: u64,
+    elapsed: Duration,
 }
 
 impl TorchContext {
@@ -120,9 +136,32 @@ impl TorchContext {
         self.text_output = None;
         self.generation_started_at = None;
         self.generated_tokens = None;
+        self.host_op_stats.clear();
         self.args = args;
         self.next_tensor = 1;
         self.next_pair = 1;
+    }
+
+    fn record_host_op(&mut self, name: &'static str, elapsed: Duration) {
+        let stats = self.host_op_stats.entry(name).or_default();
+        stats.count += 1;
+        stats.elapsed += elapsed;
+    }
+
+    fn print_host_op_stats(&self) {
+        if !self.host_op_profile_enabled || self.host_op_stats.is_empty() {
+            return;
+        }
+        let mut entries = self.host_op_stats.iter().collect::<Vec<_>>();
+        entries.sort_by_key(|(_, stats)| std::cmp::Reverse(stats.elapsed.as_nanos()));
+        eprintln!("host op profile:");
+        for (name, stats) in entries {
+            eprintln!(
+                "  {name}: count={}, {:.3} ms",
+                stats.count,
+                stats.elapsed.as_secs_f64() * 1000.0
+            );
+        }
     }
 
     fn finish(&mut self) -> Result<Tensor> {
@@ -145,6 +184,7 @@ impl TorchContext {
         self.text_output = None;
         self.generation_started_at = None;
         self.generated_tokens = None;
+        self.print_host_op_stats();
         Ok(output)
     }
 
@@ -163,6 +203,7 @@ impl TorchContext {
         self.rope_cache.clear();
         self.args.clear();
         self.output = None;
+        self.print_host_op_stats();
         ScriptTextOutput {
             text,
             generated_tokens,
@@ -196,6 +237,8 @@ impl TorchHostRuntime {
                 text_output: None,
                 generation_started_at: None,
                 generated_tokens: None,
+                host_op_profile_enabled: std::env::var_os("KOHARU_TORCH_PROFILE_OPS").is_some(),
+                host_op_stats: HashMap::new(),
                 next_tensor: 1,
                 next_pair: 1,
             })),
@@ -255,6 +298,7 @@ impl TorchHostRuntime {
                 *name,
                 Box::new(BoundHost {
                     context: Arc::clone(&self.context),
+                    name: *name,
                     op: *op,
                 }),
             );
@@ -630,6 +674,7 @@ fn runtime_compact2(context: &mut TorchContext, args: &[Value]) -> VmResult<Call
         keep.insert(output);
     }
     context.tensors.retain(|handle, _| keep.contains(handle));
+    context.pairs.clear();
     context
         .weight_handles
         .retain(|_, handle| context.tensors.contains_key(handle));
@@ -1283,11 +1328,10 @@ fn nn_rms_norm(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutco
     let input = context.tensor(int_arg(args, 0, "tensor")?)?.shallow_clone();
     let weight = context.tensor(int_arg(args, 1, "weight")?)?.shallow_clone();
     let eps = float_arg(args, 2, "eps")?;
-    let fp32 = input.to_kind(Kind::Float);
-    let variance = fp32
-        .pow_tensor_scalar(2.0)
-        .mean_dim(&[-1][..], true, Kind::Float);
-    let output = (fp32 * (variance + eps).rsqrt()).to_kind(Kind::BFloat16) * weight;
+    let normalized_shape = weight.size();
+    let output = input
+        .internal_fused_rms_norm(normalized_shape, Some(&weight), eps)
+        .0;
     return_tensor(context, output)
 }
 
