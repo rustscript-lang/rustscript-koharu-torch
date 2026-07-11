@@ -683,7 +683,7 @@ fn tensor_to_model_device(tensor: Tensor, device: Device, target_kind: Option<Ki
 
 fn requested_weight_kind() -> Result<Option<Kind>> {
     let Some(value) = std::env::var_os("KOHARU_TORCH_WEIGHT_KIND") else {
-        return Ok(None);
+        return Ok(Some(Kind::Float));
     };
     let value = value.to_string_lossy().to_ascii_lowercase();
     match value.as_str() {
