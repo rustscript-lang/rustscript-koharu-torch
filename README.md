@@ -4,47 +4,80 @@
 
 > Flint is all you need to light the Torch.
 
-Flint is an AI framework for defining and running model graphs in
-[RustScript](https://github.com/rustscript-lang/rustscript). It exposes native
-tensor operations from [`koharu-torch`](https://github.com/mayocream/koharu) as
-RustScript host functions, keeping model architecture and inference control in
-scripts while Rust manages devices, weights, tokenization, and execution.
+Flint is a RustScript-native AI inference framework. It exposes Torch tensor
+operations, llama.cpp model primitives, stable-diffusion.cpp image generation,
+GGML backend discovery, tokenization, and safetensors I/O as composable host
+functions. Model architecture, sampling loops, and inference workflows remain
+in [RustScript](https://github.com/rustscript-lang/rustscript), while the Rust
+library manages native resources through
+[`koharu`](https://github.com/mayocream/koharu) and executes scripts with the
+RustScript VM.
 
 ## How it works
 
-Flint compiles a RustScript program and runs it with `TorchScriptRunner` on a
-selected CPU, CUDA, MPS, or Vulkan device. Before execution, the runner binds
-the `flint::*` host functions listed below.
+Flint compiles a RustScript program and binds the `flint::*` host functions
+listed below. There are two library runners:
+
+- `TorchScriptRunner` initializes LibTorch and executes tensor programs on a
+  selected CPU, CUDA, MPS, or Vulkan device.
+- `ScriptRunner` executes native GGML, llama.cpp, and stable-diffusion.cpp
+  programs without initializing LibTorch.
 
 Tensor and pair values cross the VM boundary as opaque integer handles. A
 RustScript program uses those handles to compose a graph, then publishes its
 result with `flint::runtime::set_output` or
-`flint::runtime::set_text_output`. Safetensors weights are loaded directly onto
-the selected device and reused by handle during the run.
+`flint::runtime::set_text_output`. Torch safetensors weights are loaded directly
+onto the selected device and reused by handle during the run. Native model
+resources retain their upstream formats, including quantized GGUF tensors.
 
 A typical integration follows this flow:
 
 1. Compile a `.rss` source file with RustScript.
-2. Create `TorchScriptRunner::new(device)` to initialize LibTorch.
+2. Create `TorchScriptRunner::new(device)` for Torch programs or
+   `ScriptRunner::new()` for native programs.
 3. Pass the compiled program and string arguments to `run_text`.
 4. Read the published text from `ScriptTextOutput`.
+
+## Installation
+
+Install the CLI from crates.io:
+
+```text
+cargo install rs-flint
+```
+
+Add Flint as a library dependency with `cargo add rs-flint`; the Rust crate is
+imported as `flint_ai`.
+
+`cargo install` installs the runner binary. The commands below assume a Flint
+repository checkout so the referenced files under `scripts/` are available;
+`--script` also accepts an absolute path to an RSS program.
 
 ## CLI
 
 The `flint` binary has explicit modes:
 
 ```text
-flint --llm --script scripts/lfm2.rss [--device cuda:0] <args...>
+flint --llm --script scripts/lfm2.rss [--device cuda:0] <weights> <tokenizer> <system-prompt> <text> <max-tokens> [ignore-eos]
+flint --llm --script scripts/lfm2_5.rss [--device cuda:0] <weights> <tokenizer> <system-prompt> <text> <max-tokens> [ignore-eos model-kind image]
 flint --llama --script scripts/llama_quantized.rss <model.gguf> <system-prompt> <user-prompt> [max-tokens backend gpu-layers n-ctx temperature top-k top-p seed]
 flint --llm --script scripts/xlm_roberta_ner_japanese.rss <model.safetensors> <tokenizer.json> <text> [max-len label-csv]
 flint --llm --script scripts/flux_klein_encode_prompt.rss <qwen3.safetensors> <tokenizer.json> <prompt> <prompt.safetensors>
 flint --lama --weights model.safetensors --image input.png --mask mask.png --output output.png [--device cuda:0]
 flint --sd --script scripts/flux_klein.rss <diffusion-model> <vae> <llm> <prompt> <output.png> [width height steps seed cfg backend params-backend max-vram wtype sample-method scheduler]
 flint --sd --script scripts/ggml_devices.rss [backend]
+flint --sd --script scripts/ggml_devices_from_path.rss <runtime-directory>
 ```
 
-When `--device` is omitted, the CLI initializes LibTorch and selects `cuda:0`
-when CUDA is available. Passing `--device` overrides that selection.
+`--llm` runs Torch-based RustScript model programs. `--llama` runs llama.cpp
+programs, and `--sd` runs stable-diffusion.cpp or GGML programs through the
+native runner. `--lama` is the dedicated LAMA image inpainting command and is
+unrelated to llama.cpp.
+
+For `--llm` and `--lama`, omitting `--device` selects `cuda:0` when CUDA is
+available and otherwise falls back to CPU. Passing `--device` accepts `cpu`,
+`cuda`, `cuda:N`, `mps`, or `vulkan`. Native backend selection is passed to the
+RSS script as a positional argument.
 
 `--llama` runs native llama.cpp RSS programs without loading LibTorch. The
 `scripts/llama_quantized.rss` program loads GGUF quantized weights directly,
@@ -66,12 +99,19 @@ Klein diffusion model, VAE, and Qwen3 text encoder paths explicitly.
 `scripts/flux_klein_encode_prompt.rss` runs a Qwen3 text encoder with
 RustScript torch operations and writes a koharu-ml-compatible prompt embedding
 file. The safetensors file contains one tensor named `prompt_embeds`; for
-Qwen3-4B FLUX.2 Klein this is expected to be `[1, 512, 7680]`.
+Qwen3-4B FLUX.2 Klein this is expected to be `[1, 512, 7680]`. Torch scripts
+can reload that tensor with `flint::tensor::load_safetensors`; the current
+`flux_klein.rss` SD path still supplies `llm_path` to stable-diffusion.cpp.
 
 `scripts/xlm_roberta_ner_japanese.rss` is a token classification example for
 `tsmatz/xlm-roberta-ner-japanese`. It implements the XLM-RoBERTa encoder and
 classifier from torch host functions in RustScript; the host only provides
 generic tensor, tokenizer, and formatting helpers.
+
+`scripts/lfm2.rss` implements LFM2-350M text generation and translation from
+Torch host functions. `scripts/lfm2_5.rss` supports both LFM2.5-230M text
+generation and LFM2.5-VL-450M image input; its `model-kind` argument is `0` for
+text and `1` for VL, with the image path supplied after it.
 
 ## Host functions
 
@@ -90,12 +130,18 @@ flint::runtime::arg_float_or
 flint::runtime::input
 flint::runtime::set_output
 flint::runtime::set_text_output
+flint::runtime::start_timer
+flint::runtime::start_decode_timer
+flint::runtime::set_token_count
+flint::runtime::set_decode_token_count
 flint::runtime::compact2
 ```
 
 Arguments are addressed by zero-based index. `set_output` publishes a tensor
-handle, while `set_text_output` publishes generated text. The compact helper
-keeps long-running scripts from retaining unused temporary tensors.
+handle, while `set_text_output` publishes generated text. Timer and token-count
+functions populate the timing and count fields returned by `ScriptTextOutput`;
+the CLI uses them to print throughput. The compact helper keeps long-running
+scripts from retaining unused temporary tensors.
 
 ### GGML
 
@@ -231,6 +277,7 @@ end-of-sequence checks:
 ```text
 flint::tokenizer::load
 flint::tokenizer::encode_chat
+flint::tokenizer::encode_vl_chat
 flint::tokenizer::encode_padded
 flint::tokenizer::format_token_labels
 flint::tokenizer::decode_generated
@@ -256,12 +303,14 @@ flint::weights::load
 flint::weights::get
 flint::weights::get_indexed
 flint::weights::get_or
+flint::weights::get_optional
 ```
 
 `load` reads a safetensors file, or every `.safetensors` file in a directory,
 onto the runner device. `get` resolves a tensor by key, `get_indexed` formats
 layer names from prefix/index/suffix, and `get_or` supports alternative keys for
-model formats that use different parameter names.
+model formats that use different parameter names. `get_optional` returns handle
+`0` when a key is absent.
 
 ### Pairs
 
@@ -327,6 +376,7 @@ flint::tensor::pad_reflect2d
 flint::tensor::relu
 flint::tensor::sigmoid
 flint::tensor::silu
+flint::tensor::gelu
 flint::tensor::swiglu
 flint::tensor::contiguous
 flint::tensor::permute3
@@ -358,6 +408,7 @@ Common model layers and fused inference operations:
 ```text
 flint::nn::embedding
 flint::nn::linear
+flint::nn::layer_norm
 flint::nn::swiglu_linear
 flint::nn::rms_norm
 flint::nn::add_rms_norm
@@ -376,10 +427,30 @@ Fused functions may return a pair handle. Use `flint::pair::local` and
 `flint::pair::global` to access each tensor result. For optional tensor
 arguments such as a linear bias, handle `0` represents no tensor.
 
+### Vision operations
+
+Image preprocessing and multimodal tensor layout helpers used by LFM2.5-VL:
+
+```text
+flint::image::lfm2_vl_patches
+flint::vl::siglip2_position_embedding
+flint::vl::pixel_unshuffle2
+flint::vl::scatter_image_embeddings
+```
+
+The image helper reads an image path and returns model-ready patches. The VL
+helpers keep the SigLIP2 position, pixel layout, and image-token scatter logic
+inside generic tensor operations rather than a model-sized host function.
+
 ## Configuration
 
 - `KOHARU_TORCH_WEIGHT_KIND` selects the floating-point kind used while loading
-  weights: `native`, `half`, `bf16`, or `float`.
+  weights: `native`, `half`, `bf16`, or `float`. The default is `float`; use
+  `native` to preserve the source tensor kind.
+- `KOHARU_TORCH_LINEAR_MV=0` disables the single-token matrix-vector fast path,
+  which is enabled by default.
+- `KOHARU_TORCH_PROFILE_OPS=1` prints aggregate Torch host-operation timings
+  after execution.
 
 ## Links
 

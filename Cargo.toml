@@ -3,7 +3,7 @@ name = "rs-flint"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
-description = "Run koharu-torch inference graphs from RustScript host functions"
+description = "RustScript-native AI inference with Torch, llama.cpp, and stable-diffusion.cpp"
 
 [lib]
 name = "flint_ai"
