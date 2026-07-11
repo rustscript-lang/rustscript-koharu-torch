@@ -104,10 +104,11 @@ async fn main() -> Result<()> {
 
 impl Lfm2Native {
     fn load(path: &PathBuf, device: Device, profile: bool) -> Result<Self> {
+        let target_kind = requested_weight_kind()?;
         let mut weights = Tensor::read_safetensors(path)
             .with_context(|| format!("failed to read {}", path.display()))?
             .into_iter()
-            .map(|(name, tensor)| (name, tensor.to_device(device)))
+            .map(|(name, tensor)| (name, tensor_to_model_device(tensor, device, target_kind)))
             .collect::<HashMap<_, _>>();
         add_fused_weights(&mut weights)?;
         Ok(Self {
@@ -607,7 +608,50 @@ fn build_rope_table(
     Tensor::from_slice(&data)
         .view([1, 1, len, head_dim as i64])
         .to_device(device)
-        .to_kind(Kind::BFloat16)
+        .to_kind(
+            requested_weight_kind()
+                .ok()
+                .flatten()
+                .unwrap_or(Kind::BFloat16),
+        )
+}
+
+fn tensor_to_model_device(tensor: Tensor, device: Device, target_kind: Option<Kind>) -> Tensor {
+    let tensor = tensor.to_device(device);
+    match target_kind {
+        Some(kind) if is_float_kind(tensor.kind()) => tensor.to_kind(kind),
+        _ => tensor,
+    }
+}
+
+fn requested_weight_kind() -> Result<Option<Kind>> {
+    let Some(value) = std::env::var_os("KOHARU_TORCH_WEIGHT_KIND") else {
+        return Ok(None);
+    };
+    let value = value.to_string_lossy().to_ascii_lowercase();
+    match value.as_str() {
+        "" | "native" | "auto" => Ok(None),
+        "half" | "fp16" | "f16" => Ok(Some(Kind::Half)),
+        "bf16" | "bfloat16" => Ok(Some(Kind::BFloat16)),
+        "float" | "fp32" | "f32" => Ok(Some(Kind::Float)),
+        other => anyhow::bail!(
+            "KOHARU_TORCH_WEIGHT_KIND must be native, half, bf16, or float, got '{other}'"
+        ),
+    }
+}
+
+fn is_float_kind(kind: Kind) -> bool {
+    matches!(
+        kind,
+        Kind::Half
+            | Kind::Float
+            | Kind::Double
+            | Kind::BFloat16
+            | Kind::Float8e5m2
+            | Kind::Float8e4m3fn
+            | Kind::Float8e5m2fnuz
+            | Kind::Float8e4m3fnuz
+    )
 }
 
 fn depthwise_conv1d(input: &Tensor, weight: &Tensor, padding: i64) -> Tensor {

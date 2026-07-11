@@ -60,6 +60,7 @@ struct TorchContext {
     weights: HashMap<String, Tensor>,
     weight_handles: HashMap<String, i64>,
     weights_path: Option<PathBuf>,
+    weights_kind: Option<Kind>,
     tokenizer: Option<Tokenizer>,
     tokenizer_path: Option<PathBuf>,
     cache: HashMap<String, Tensor>,
@@ -225,6 +226,7 @@ impl TorchHostRuntime {
                 weights: HashMap::new(),
                 weight_handles: HashMap::new(),
                 weights_path: None,
+                weights_kind: None,
                 tokenizer: None,
                 tokenizer_path: None,
                 cache: HashMap::new(),
@@ -540,15 +542,24 @@ fn runtime_arg_int_or(context: &mut TorchContext, args: &[Value]) -> VmResult<Ca
 
 fn weights_load(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
     let path = PathBuf::from(string_arg(args, 0, "path")?);
-    if context.weights_path.as_deref() != Some(path.as_path()) {
+    let target_kind = requested_weight_kind().map_err(host_error)?;
+    if context.weights_path.as_deref() != Some(path.as_path())
+        || context.weights_kind != target_kind
+    {
         context.weight_handles.clear();
         let weights = Tensor::read_safetensors(&path)
             .map_err(|err| host_error(format!("failed to read {}: {err}", path.display())))?
             .into_iter()
-            .map(|(name, tensor)| (name, tensor.to_device(context.device)))
+            .map(|(name, tensor)| {
+                (
+                    name,
+                    tensor_to_model_device(tensor, context.device, target_kind),
+                )
+            })
             .collect();
         context.weights = weights;
         context.weights_path = Some(path);
+        context.weights_kind = target_kind;
     }
     let count = i64::try_from(context.weights.len())
         .map_err(|_| host_error("weight count exceeds RustScript integer range"))?;
@@ -984,7 +995,50 @@ fn build_rope_table(
     Tensor::from_slice(&data)
         .view([1, 1, len, head_dim as i64])
         .to_device(device)
-        .to_kind(Kind::BFloat16)
+        .to_kind(
+            requested_weight_kind()
+                .ok()
+                .flatten()
+                .unwrap_or(Kind::BFloat16),
+        )
+}
+
+fn tensor_to_model_device(tensor: Tensor, device: Device, target_kind: Option<Kind>) -> Tensor {
+    let tensor = tensor.to_device(device);
+    match target_kind {
+        Some(kind) if is_float_kind(tensor.kind()) => tensor.to_kind(kind),
+        _ => tensor,
+    }
+}
+
+fn requested_weight_kind() -> std::result::Result<Option<Kind>, String> {
+    let Some(value) = std::env::var_os("KOHARU_TORCH_WEIGHT_KIND") else {
+        return Ok(None);
+    };
+    let value = value.to_string_lossy().to_ascii_lowercase();
+    match value.as_str() {
+        "" | "native" | "auto" => Ok(None),
+        "half" | "fp16" | "f16" => Ok(Some(Kind::Half)),
+        "bf16" | "bfloat16" => Ok(Some(Kind::BFloat16)),
+        "float" | "fp32" | "f32" => Ok(Some(Kind::Float)),
+        other => Err(format!(
+            "KOHARU_TORCH_WEIGHT_KIND must be native, half, bf16, or float, got '{other}'"
+        )),
+    }
+}
+
+fn is_float_kind(kind: Kind) -> bool {
+    matches!(
+        kind,
+        Kind::Half
+            | Kind::Float
+            | Kind::Double
+            | Kind::BFloat16
+            | Kind::Float8e5m2
+            | Kind::Float8e4m3fn
+            | Kind::Float8e5m2fnuz
+            | Kind::Float8e4m3fnuz
+    )
 }
 
 fn tensor_add(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
