@@ -304,10 +304,10 @@ pub(super) fn sd_img_gen_params_set_sampler_impl(
     sample_method: i64,
     scheduler: i64,
 ) -> VmResult<CallOutcome> {
-    let sample_method = SampleMethod::try_from(checked_i32(sample_method, "sample_method")?)
+    let sample_method = SampleMethod::try_from(checked_i32(sample_method, "sample_method")? as _)
         .map_err(diffusion_error)?;
     let scheduler =
-        Scheduler::try_from(checked_i32(scheduler, "scheduler")?).map_err(diffusion_error)?;
+        Scheduler::try_from(checked_i32(scheduler, "scheduler")? as _).map_err(diffusion_error)?;
     let mut handles = SD_IMG_PARAMS_HANDLES
         .lock()
         .map_err(|_| registry_error("image parameter"))?;
@@ -338,7 +338,7 @@ pub(super) fn sd_str_to_scheduler_impl(name: &str) -> VmResult<CallOutcome> {
 /// Converts a sample method enum value to its name.
 #[pd_host_function(name = "flint::sd::sample_method_name")]
 pub(super) fn sd_sample_method_name_impl(sample_method: i64) -> VmResult<CallOutcome> {
-    let value = SampleMethod::try_from(checked_i32(sample_method, "sample_method")?)
+    let value = SampleMethod::try_from(checked_i32(sample_method, "sample_method")? as _)
         .map_err(diffusion_error)?;
     return_value(Value::String(value.as_str().to_owned().into()))
 }
@@ -347,7 +347,7 @@ pub(super) fn sd_sample_method_name_impl(sample_method: i64) -> VmResult<CallOut
 #[pd_host_function(name = "flint::sd::scheduler_name")]
 pub(super) fn sd_scheduler_name_impl(scheduler: i64) -> VmResult<CallOutcome> {
     let value =
-        Scheduler::try_from(checked_i32(scheduler, "scheduler")?).map_err(diffusion_error)?;
+        Scheduler::try_from(checked_i32(scheduler, "scheduler")? as _).map_err(diffusion_error)?;
     return_value(Value::String(value.as_str().to_owned().into()))
 }
 
@@ -370,7 +370,7 @@ pub(super) fn sd_get_default_scheduler_impl(
     ctx_handle: i64,
     sample_method: i64,
 ) -> VmResult<CallOutcome> {
-    let sample_method = SampleMethod::try_from(checked_i32(sample_method, "sample_method")?)
+    let sample_method = SampleMethod::try_from(checked_i32(sample_method, "sample_method")? as _)
         .map_err(diffusion_error)?;
     let handles = SD_CTX_HANDLES
         .lock()
