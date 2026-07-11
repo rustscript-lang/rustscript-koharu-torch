@@ -2,7 +2,7 @@
 name = "rs-flint"
 version = "0.1.0"
 edition = "2024"
-license = "GPL-3.0-only"
+license = "Apache-2.0"
 description = "Run koharu-torch inference graphs from RustScript host functions"
 
 [[bin]]
