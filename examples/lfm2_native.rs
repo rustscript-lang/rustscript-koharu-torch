@@ -402,12 +402,11 @@ impl Lfm2Native {
                 .conv_cache
                 .get(&layer)
                 .with_context(|| format!("missing conv cache for layer {layer}"))?;
-            let groups = bx.size()[1];
+            let w0 = self.weight(&layer_name(layer, "conv.conv.weight.w0"))?;
+            let w1 = self.weight(&layer_name(layer, "conv.conv.weight.w1"))?;
+            let w2 = self.weight(&layer_name(layer, "conv.conv.weight.w2"))?;
             let old0 = old_state.narrow(2, 0, 1);
             let old1 = old_state.narrow(2, 1, 1);
-            let w0 = weight.select(2, 0).view([1, groups, 1]);
-            let w1 = weight.select(2, 1).view([1, groups, 1]);
-            let w2 = weight.select(2, 2).view([1, groups, 1]);
             let output = old0 * w0 + old1.shallow_clone() * w1 + bx.shallow_clone() * w2;
             self.conv_cache.insert(layer, Tensor::cat(&[&old1, &bx], 2));
             output
@@ -566,6 +565,21 @@ fn add_fused_weights(weights: &mut HashMap<String, Tensor>) -> Result<()> {
         ));
     }
     for layer in 0..16 {
+        if let Some(weight) = weights.get(&layer_name(layer, "conv.conv.weight")) {
+            let groups = weight.size()[0];
+            fused.push((
+                layer_name(layer, "conv.conv.weight.w0"),
+                weight.select(2, 0).view([1, groups, 1]),
+            ));
+            fused.push((
+                layer_name(layer, "conv.conv.weight.w1"),
+                weight.select(2, 1).view([1, groups, 1]),
+            ));
+            fused.push((
+                layer_name(layer, "conv.conv.weight.w2"),
+                weight.select(2, 2).view([1, groups, 1]),
+            ));
+        }
         let w1 = weights
             .get(&layer_name(layer, "feed_forward.w1.weight"))
             .with_context(|| format!("missing feed-forward w1 for layer {layer}"))?;

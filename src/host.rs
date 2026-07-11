@@ -74,6 +74,22 @@ struct RopeCacheKey {
     theta_bits: u32,
 }
 
+struct Conv1dStepWeights {
+    w0: Tensor,
+    w1: Tensor,
+    w2: Tensor,
+}
+
+impl Clone for Conv1dStepWeights {
+    fn clone(&self) -> Self {
+        Self {
+            w0: self.w0.shallow_clone(),
+            w1: self.w1.shallow_clone(),
+            w2: self.w2.shallow_clone(),
+        }
+    }
+}
+
 struct TorchContext {
     device: Device,
     weights: HashMap<String, Tensor>,
@@ -84,6 +100,7 @@ struct TorchContext {
     tokenizer_path: Option<PathBuf>,
     cache: HashMap<String, Tensor>,
     rope_cache: HashMap<RopeCacheKey, Tensor>,
+    conv1d_step_weights: HashMap<i64, Conv1dStepWeights>,
     tensors: HashMap<i64, Tensor>,
     pairs: HashMap<i64, FfcPair>,
     inputs: Vec<i64>,
@@ -155,6 +172,7 @@ impl TorchContext {
         self.cache.clear();
         self.weight_handles.clear();
         self.rope_cache.clear();
+        self.conv1d_step_weights.clear();
         self.output = None;
         self.text_output = None;
         self.generation_started_at = None;
@@ -205,6 +223,7 @@ impl TorchContext {
         self.cache.clear();
         self.weight_handles.clear();
         self.rope_cache.clear();
+        self.conv1d_step_weights.clear();
         self.args.clear();
         self.output = None;
         self.text_output = None;
@@ -231,6 +250,7 @@ impl TorchContext {
         self.cache.clear();
         self.weight_handles.clear();
         self.rope_cache.clear();
+        self.conv1d_step_weights.clear();
         self.args.clear();
         self.output = None;
         self.print_host_op_stats();
@@ -262,6 +282,7 @@ impl TorchHostRuntime {
                 tokenizer_path: None,
                 cache: HashMap::new(),
                 rope_cache: HashMap::new(),
+                conv1d_step_weights: HashMap::new(),
                 tensors: HashMap::new(),
                 pairs: HashMap::new(),
                 inputs: Vec::new(),
@@ -601,6 +622,7 @@ fn weights_load(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutc
         || context.weights_kind != target_kind
     {
         context.weight_handles.clear();
+        context.conv1d_step_weights.clear();
         let weights = Tensor::read_safetensors(&path)
             .map_err(|err| host_error(format!("failed to read {}: {err}", path.display())))?
             .into_iter()
@@ -1750,14 +1772,10 @@ fn nn_conv1d(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome
 fn nn_conv1d_step(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
     let state = context.tensor(int_arg(args, 0, "state")?)?.shallow_clone();
     let input = context.tensor(int_arg(args, 1, "input")?)?.shallow_clone();
-    let weight = context.tensor(int_arg(args, 2, "weight")?)?.shallow_clone();
+    let weight_handle = int_arg(args, 2, "weight")?;
     let state_size = state.size();
     let input_size = input.size();
-    let weight_size = weight.size();
-    if state_size.len() != 3
-        || input_size.len() != 3
-        || weight_size.as_slice() != [input_size[1], 1, 3]
-    {
+    if state_size.len() != 3 || input_size.len() != 3 {
         return Err(host_error(
             "conv1d_step expects state [B,C,2], input [B,C,1], weight [C,1,3]",
         ));
@@ -1772,16 +1790,40 @@ fn nn_conv1d_step(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOu
         ));
     }
     let groups = input_size[1];
+    let weights = cached_conv1d_step_weights(context, weight_handle, groups)?;
     let old0 = state.narrow(2, 0, 1);
     let old1 = state.narrow(2, 1, 1);
-    let w0 = weight.select(2, 0).view([1, groups, 1]);
-    let w1 = weight.select(2, 1).view([1, groups, 1]);
-    let w2 = weight.select(2, 2).view([1, groups, 1]);
-    let output = old0 * w0 + old1.shallow_clone() * w1 + input.shallow_clone() * w2;
+    let output =
+        old0 * weights.w0 + old1.shallow_clone() * weights.w1 + input.shallow_clone() * weights.w2;
     let next_state = Tensor::cat(&[&old1, &input], 2);
     let local = context.insert_tensor(output);
     let global = context.insert_tensor(next_state);
     return_int(context.insert_pair(FfcPair { local, global }))
+}
+
+fn cached_conv1d_step_weights(
+    context: &mut TorchContext,
+    weight_handle: i64,
+    groups: i64,
+) -> VmResult<Conv1dStepWeights> {
+    if let Some(weights) = context.conv1d_step_weights.get(&weight_handle) {
+        return Ok(weights.clone());
+    }
+    let weight = context.tensor(weight_handle)?.shallow_clone();
+    if weight.size().as_slice() != [groups, 1, 3] {
+        return Err(host_error(
+            "conv1d_step expects state [B,C,2], input [B,C,1], weight [C,1,3]",
+        ));
+    }
+    let weights = Conv1dStepWeights {
+        w0: weight.select(2, 0).view([1, groups, 1]),
+        w1: weight.select(2, 1).view([1, groups, 1]),
+        w2: weight.select(2, 2).view([1, groups, 1]),
+    };
+    context
+        .conv1d_step_weights
+        .insert(weight_handle, weights.clone());
+    Ok(weights)
 }
 
 fn nn_conv2d(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
