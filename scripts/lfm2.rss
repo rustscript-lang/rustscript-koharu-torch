@@ -24,6 +24,11 @@ fn rms_norm(input: int, weight_name: string) -> int {
     torch::nn::rms_norm(input, scale_weight, 0.00001)
 }
 
+fn add_rms_norm(input: int, residual: int, weight_name: string) -> int {
+    let scale_weight = weight(weight_name);
+    torch::nn::add_rms_norm(input, residual, scale_weight, 0.00001)
+}
+
 fn rotate_half(input: int) -> int {
     let head_dim: int = torch::tensor::size(input, -1);
     let half = head_dim / 2;
@@ -158,8 +163,9 @@ fn mlp(input: int, prefix: string) -> int {
 }
 
 fn finish_layer(input: int, prefix: string, mixed: int) -> int {
-    let hidden: int = torch::tensor::add(input, mixed);
-    let ffn_input: int = rms_norm(hidden, prefix + ".ffn_norm.weight");
+    let hidden_norm: int = add_rms_norm(input, mixed, prefix + ".ffn_norm.weight");
+    let hidden: int = torch::pair::local(hidden_norm);
+    let ffn_input: int = torch::pair::global(hidden_norm);
     let feed_forward: int = mlp(ffn_input, prefix + ".feed_forward");
     torch::tensor::add(hidden, feed_forward)
 }

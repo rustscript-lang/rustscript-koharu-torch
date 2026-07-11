@@ -433,6 +433,7 @@ const HOST_OPS: &[(&str, HostOp)] = &[
     ("torch::nn::embedding", nn_embedding),
     ("torch::nn::linear", nn_linear),
     ("torch::nn::rms_norm", nn_rms_norm),
+    ("torch::nn::add_rms_norm", nn_add_rms_norm),
     ("torch::nn::apply_rope", nn_apply_rope),
     (
         "torch::nn::scaled_dot_product_attention",
@@ -1446,6 +1447,27 @@ fn nn_rms_norm(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutco
         .internal_fused_rms_norm(normalized_shape, Some(&weight), eps)
         .0;
     return_tensor(context, output)
+}
+
+fn nn_add_rms_norm(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "input")?)?.shallow_clone();
+    let residual = context
+        .tensor(int_arg(args, 1, "residual")?)?
+        .shallow_clone();
+    let weight = context.tensor(int_arg(args, 2, "weight")?)?.shallow_clone();
+    let eps = float_arg(args, 3, "eps")?;
+    let hidden = input + residual;
+    let normalized_shape = weight.size();
+    let normalized = hidden
+        .shallow_clone()
+        .internal_fused_rms_norm(normalized_shape, Some(&weight), eps)
+        .0;
+    let hidden = context.insert_tensor(hidden);
+    let normalized = context.insert_tensor(normalized);
+    return_int(context.insert_pair(FfcPair {
+        local: hidden,
+        global: normalized,
+    }))
 }
 
 fn nn_apply_rope(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
