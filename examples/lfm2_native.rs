@@ -141,6 +141,7 @@ impl Lfm2Native {
         let prompt_len = prompt_ids.len();
         let mut all_ids = prompt_ids.clone();
         let prompt_tokens = self.tokens_tensor(&prompt_ids);
+        let mut all_tokens = prompt_tokens.shallow_clone();
         sync_if_cuda(self.device);
         let total_started = Instant::now();
 
@@ -156,29 +157,52 @@ impl Lfm2Native {
 
         let mut generated_tokens = 0usize;
         let mut decode_started = None;
-        for step in 0..max_new_tokens {
-            let next_token = argmax_int(&logits);
-            all_ids.push(next_token);
-            generated_tokens += 1;
-            if !ignore_eos && next_token == 7 {
-                break;
-            }
-            if step + 1 < max_new_tokens {
-                if decode_started.is_none() {
-                    sync_if_cuda(self.device);
-                    decode_started = Some(Instant::now());
+        if ignore_eos {
+            for step in 0..max_new_tokens {
+                let next_token = argmax_token(&logits);
+                all_tokens = Tensor::cat(&[&all_tokens, &next_token], 1);
+                generated_tokens += 1;
+                if step + 1 < max_new_tokens {
+                    if decode_started.is_none() {
+                        sync_if_cuda(self.device);
+                        decode_started = Some(Instant::now());
+                    }
+                    let decode_position = prompt_len + generated_tokens - 1;
+                    let timed = self.profile_start();
+                    logits = self.model(next_token, decode_position, true)?;
+                    self.profile_end("decode_model", timed);
                 }
-                let decode_input = self.tokens_tensor(&[next_token]);
-                let decode_position = prompt_len + generated_tokens - 1;
-                let timed = self.profile_start();
-                logits = self.model(decode_input, decode_position, true)?;
-                self.profile_end("decode_model", timed);
+            }
+        } else {
+            for step in 0..max_new_tokens {
+                let next_token = argmax_int(&logits);
+                all_ids.push(next_token);
+                generated_tokens += 1;
+                if next_token == 7 {
+                    break;
+                }
+                if step + 1 < max_new_tokens {
+                    if decode_started.is_none() {
+                        sync_if_cuda(self.device);
+                        decode_started = Some(Instant::now());
+                    }
+                    let decode_input = self.tokens_tensor(&[next_token]);
+                    let decode_position = prompt_len + generated_tokens - 1;
+                    let timed = self.profile_start();
+                    logits = self.model(decode_input, decode_position, true)?;
+                    self.profile_end("decode_model", timed);
+                }
             }
         }
         sync_if_cuda(self.device);
         let total_elapsed = total_started.elapsed();
         let decode_elapsed = decode_started.map(|started| started.elapsed());
-        let generated = all_ids
+        let generated_ids = if ignore_eos {
+            token_ids_from_tensor(&all_tokens)?
+        } else {
+            all_ids
+        };
+        let generated = generated_ids
             .into_iter()
             .skip(prompt_len)
             .filter_map(|id| u32::try_from(id).ok())
@@ -618,6 +642,15 @@ fn tail(input: &Tensor, raw_dim: i64, len: i64) -> Tensor {
 fn argmax_int(input: &Tensor) -> i64 {
     let output = input.argmax(-1, false).to_device(Device::Cpu).view([-1]);
     output.int64_value(&[0])
+}
+
+fn argmax_token(input: &Tensor) -> Tensor {
+    input.argmax(-1, false).view([1, 1])
+}
+
+fn token_ids_from_tensor(input: &Tensor) -> Result<Vec<i64>> {
+    let tokens = input.to_device(Device::Cpu).to_kind(Kind::Int64).view([-1]);
+    Vec::<i64>::try_from(&tokens).context("failed to copy token ids")
 }
 
 fn sync_if_cuda(device: Device) {

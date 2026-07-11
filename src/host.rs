@@ -360,6 +360,10 @@ const HOST_OPS: &[(&str, HostOp)] = &[
         tokenizer_decode_generated,
     ),
     ("torch::tokenizer::append_token", tokenizer_append_token),
+    (
+        "torch::tokenizer::append_token_tensor",
+        tokenizer_append_token_tensor,
+    ),
     ("torch::tokenizer::single_token", tokenizer_single_token),
     ("torch::tokenizer::is_eos", tokenizer_is_eos),
     ("torch::weights::load", weights_load),
@@ -403,6 +407,7 @@ const HOST_OPS: &[(&str, HostOp)] = &[
     ("torch::tensor::unsqueeze", tensor_unsqueeze),
     ("torch::tensor::repeat_interleave", tensor_repeat_interleave),
     ("torch::tensor::argmax_int", tensor_argmax_int),
+    ("torch::tensor::argmax_token", tensor_argmax_token),
     ("torch::tensor::pad_reflect2d", tensor_pad_reflect2d),
     ("torch::tensor::relu", tensor_relu),
     ("torch::tensor::sigmoid", tensor_sigmoid),
@@ -785,6 +790,16 @@ fn tokenizer_append_token(context: &mut TorchContext, args: &[Value]) -> VmResul
     return_tensor(context, output)
 }
 
+fn tokenizer_append_token_tensor(
+    context: &mut TorchContext,
+    args: &[Value],
+) -> VmResult<CallOutcome> {
+    let tokens = context.tensor(int_arg(args, 0, "tokens")?)?;
+    let next = context.tensor(int_arg(args, 1, "token")?)?;
+    let output = Tensor::cat(&[tokens, next], 1);
+    return_tensor(context, output)
+}
+
 fn tokenizer_single_token(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
     let token = int_arg(args, 0, "token")?;
     let output = Tensor::from_slice(&[token])
@@ -1146,6 +1161,13 @@ fn tensor_argmax_int(context: &mut TorchContext, args: &[Value]) -> VmResult<Cal
     let dim = int_arg(args, 1, "dim")?;
     let output = input.argmax(dim, false).to_device(Device::Cpu).view([-1]);
     return_int(output.int64_value(&[0]))
+}
+
+fn tensor_argmax_token(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+    let input = context.tensor(int_arg(args, 0, "tensor")?)?;
+    let dim = int_arg(args, 1, "dim")?;
+    let output = input.argmax(dim, false).view([1, 1]);
+    return_tensor(context, output)
 }
 
 fn tensor_pad_reflect2d(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {

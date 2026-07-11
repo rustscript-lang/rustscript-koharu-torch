@@ -234,20 +234,35 @@ torch::cache::clear();
 torch::runtime::start_timer();
 let mut logits = model(prompt_tokens, 0, false);
 torch::runtime::compact2(logits, tokens);
-while step < max_new_tokens {
-    let next_token: int = torch::tensor::argmax_int(logits, -1);
-    let appended: int = torch::tokenizer::append_token(tokens, next_token);
-    tokens = appended;
-    generated_tokens = generated_tokens + 1;
-    step = step + 1;
-    if ignore_eos == 0 && torch::tokenizer::is_eos(next_token) {
-        break;
+if ignore_eos == 0 {
+    while step < max_new_tokens {
+        let next_token: int = torch::tensor::argmax_int(logits, -1);
+        let appended: int = torch::tokenizer::append_token(tokens, next_token);
+        tokens = appended;
+        generated_tokens = generated_tokens + 1;
+        step = step + 1;
+        if torch::tokenizer::is_eos(next_token) {
+            break;
+        }
+        if step < max_new_tokens {
+            let decode_input: int = torch::tokenizer::single_token(next_token);
+            let decode_position: int = prompt_len + generated_tokens - 1;
+            logits = model(decode_input, decode_position, true);
+            torch::runtime::compact2(logits, tokens);
+        }
     }
-    if step < max_new_tokens {
-        let decode_input: int = torch::tokenizer::single_token(next_token);
-        let decode_position: int = prompt_len + generated_tokens - 1;
-        logits = model(decode_input, decode_position, true);
-        torch::runtime::compact2(logits, tokens);
+} else {
+    while step < max_new_tokens {
+        let next_token: int = torch::tensor::argmax_token(logits, -1);
+        let appended: int = torch::tokenizer::append_token_tensor(tokens, next_token);
+        tokens = appended;
+        generated_tokens = generated_tokens + 1;
+        step = step + 1;
+        if step < max_new_tokens {
+            let decode_position: int = prompt_len + generated_tokens - 1;
+            logits = model(next_token, decode_position, true);
+            torch::runtime::compact2(logits, tokens);
+        }
     }
 }
 
