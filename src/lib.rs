@@ -9,6 +9,7 @@ use image::{DynamicImage, GrayImage, RgbImage};
 use imageproc::contours::{BorderType, find_contours_with_threshold};
 use koharu_runtime::package::{Package, libtorch::Libtorch, loading::preload};
 use koharu_torch::{Device, Kind, Tensor};
+pub(crate) use vm::{CallOutcome, Value, VmResult};
 use vm::{Program, compile_source};
 
 use crate::host::TorchHostRuntime;

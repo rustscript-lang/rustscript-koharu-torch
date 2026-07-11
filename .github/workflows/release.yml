@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to upload files to"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: target
+
+jobs:
+  build-runner:
+    name: Build Flint runner (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            exe_suffix: ""
+          - os: windows-latest
+            platform: windows-x86_64
+            exe_suffix: ".exe"
+          - os: macos-14
+            platform: macos-arm64
+            exe_suffix: ""
+
+    steps:
+      - name: Checkout Flint
+        uses: actions/checkout@v4
+        with:
+          path: flint
+
+      - name: Checkout RustScript / pd-vm
+        uses: actions/checkout@v4
+        with:
+          repository: rustscript-lang/rustscript
+          path: rustscript
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release runner
+        working-directory: flint
+        run: cargo build --release --locked --bin flint-ai
+
+      - name: Package runner
+        id: package
+        shell: python
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          EXE_SUFFIX: ${{ matrix.exe_suffix }}
+        run: |
+          import os
+          import pathlib
+          import shutil
+          import zipfile
+
+          root = pathlib.Path("flint")
+          cargo_target_dir = pathlib.Path(os.environ.get("CARGO_TARGET_DIR", "target"))
+          if not cargo_target_dir.is_absolute():
+              cargo_target_dir = root / cargo_target_dir
+          release_dir = cargo_target_dir / "release"
+          package_name = f"flint-ai-{os.environ['PLATFORM']}"
+          package_dir = root / "dist" / package_name
+          archive = root / "dist" / f"{package_name}.zip"
+          exe_suffix = os.environ.get("EXE_SUFFIX", "")
+
+          if package_dir.exists():
+              shutil.rmtree(package_dir)
+          package_dir.mkdir(parents=True, exist_ok=True)
+
+          binary = release_dir / f"flint-ai{exe_suffix}"
+          if not binary.exists():
+              raise FileNotFoundError(f"missing built runner binary: {binary}")
+          shutil.copy2(binary, package_dir / binary.name)
+
+          for extra in ("README.md", "LICENSE"):
+              source = root / extra
+              if source.exists():
+                  shutil.copy2(source, package_dir / extra)
+
+          with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+              for path in package_dir.rglob("*"):
+                  zf.write(path, path.relative_to(package_dir.parent))
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"archive={archive.as_posix()}\n")
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          files: ${{ steps.package.outputs.archive }}
+          fail_on_unmatched_files: true

@@ -1,5 +1,5 @@
 [package]
-name = "rustscript-koharu-torch"
+name = "flint-ai"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-only"
@@ -12,6 +12,7 @@ image = "0.25"
 imageproc = "0.27"
 koharu-runtime = { git = "https://github.com/mayocream/koharu.git", branch = "refactor/0705", package = "koharu-runtime" }
 koharu-torch = { git = "https://github.com/mayocream/koharu.git", branch = "refactor/0705", package = "koharu-torch" }
+pd-host-function = { path = "../rustscript/pd-host-function" }
 tokenizers = "0.22"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 vm = { package = "pd-vm", path = "../rustscript", default-features = false, features = ["runtime", "cranelift-jit"] }

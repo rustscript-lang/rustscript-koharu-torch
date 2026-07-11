@@ -1,5 +1,9 @@
-use std::cell::UnsafeCell;
-use std::collections::{HashMap, HashSet};
+mod cache;
+mod pair;
+mod runtime;
+
+use std::cell::{Cell, UnsafeCell};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -12,7 +16,11 @@ use vm::{
     jit::JitConfig,
 };
 
-type HostOp = fn(&mut TorchContext, &[Value]) -> VmResult<CallOutcome>;
+#[derive(Clone, Copy)]
+enum HostOp {
+    Context(fn(&mut TorchContext, &[Value]) -> VmResult<CallOutcome>),
+    Static(fn(&[Value]) -> VmResult<CallOutcome>),
+}
 
 struct BoundHost {
     context: Arc<TorchContextCell>,
@@ -25,13 +33,26 @@ impl HostArgsFunction for BoundHost {
         let context = self.context.get();
         if context.host_op_profile_enabled {
             let started = Instant::now();
-            let outcome = (self.op)(context, args);
+            let outcome = self.op.call(context, args);
             context.record_host_op(self.name, started.elapsed());
             outcome
         } else {
-            (self.op)(context, args)
+            self.op.call(context, args)
         }
     }
+}
+
+impl HostOp {
+    fn call(self, context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
+        match self {
+            Self::Context(op) => op(context, args),
+            Self::Static(op) => op(args),
+        }
+    }
+}
+
+thread_local! {
+    static CURRENT_CONTEXT: Cell<*mut TorchContext> = const { Cell::new(std::ptr::null_mut()) };
 }
 
 struct TorchContextCell {
@@ -53,6 +74,33 @@ impl TorchContextCell {
     fn get(&self) -> &mut TorchContext {
         unsafe { &mut *self.inner.get() }
     }
+
+    fn enter(&self) -> CurrentContextGuard {
+        let next = self.inner.get();
+        let previous = CURRENT_CONTEXT.replace(next);
+        CurrentContextGuard { previous }
+    }
+}
+
+struct CurrentContextGuard {
+    previous: *mut TorchContext,
+}
+
+impl Drop for CurrentContextGuard {
+    fn drop(&mut self) {
+        CURRENT_CONTEXT.set(self.previous);
+    }
+}
+
+fn with_context<T>(op: impl FnOnce(&mut TorchContext) -> T) -> T {
+    CURRENT_CONTEXT.with(|slot| {
+        let pointer = slot.get();
+        assert!(
+            !pointer.is_null(),
+            "flint host context is not active for this thread"
+        );
+        unsafe { op(&mut *pointer) }
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -317,6 +365,7 @@ impl TorchHostRuntime {
         self.context.get().begin(image, mask, args);
         let mut vm = Vm::new_shared_with_jit_config(program, torch_jit_config());
         self.bind(&mut vm);
+        let _current_context = self.context.enter();
         let status = koharu_torch::no_grad(|| vm.run()).map_err(|err| anyhow!(err.to_string()))?;
         if status != VmStatus::Halted {
             bail!("RustScript did not halt: {status:?}");
@@ -336,6 +385,7 @@ impl TorchHostRuntime {
         self.context.get().begin_args(args);
         let mut vm = Vm::new_shared_with_jit_config(program, torch_jit_config());
         self.bind(&mut vm);
+        let _current_context = self.context.enter();
         let status = koharu_torch::no_grad(|| vm.run()).map_err(|err| anyhow!(err.to_string()))?;
         if status != VmStatus::Halted {
             bail!("RustScript did not halt: {status:?}");
@@ -393,130 +443,235 @@ impl TorchScriptRunner {
 }
 
 const HOST_OPS: &[(&str, HostOp)] = &[
-    ("torch::runtime::arg", runtime_arg),
-    ("torch::runtime::arg_int", runtime_arg_int),
-    ("torch::runtime::arg_int_or", runtime_arg_int_or),
-    ("torch::runtime::input", runtime_input),
-    ("torch::runtime::set_output", runtime_set_output),
-    ("torch::runtime::set_text_output", runtime_set_text_output),
-    ("torch::runtime::start_timer", runtime_start_timer),
+    ("flint::runtime::arg", HostOp::Static(runtime::runtime_arg)),
     (
-        "torch::runtime::start_decode_timer",
-        runtime_start_decode_timer,
-    ),
-    ("torch::runtime::set_token_count", runtime_set_token_count),
-    (
-        "torch::runtime::set_decode_token_count",
-        runtime_set_decode_token_count,
-    ),
-    ("torch::runtime::compact2", runtime_compact2),
-    ("torch::cache::clear", cache_clear),
-    ("torch::cache::has", cache_has),
-    ("torch::cache::get", cache_get),
-    ("torch::cache::set", cache_set),
-    ("torch::tokenizer::load", tokenizer_load),
-    ("torch::tokenizer::encode_chat", tokenizer_encode_chat),
-    (
-        "torch::tokenizer::decode_generated",
-        tokenizer_decode_generated,
-    ),
-    ("torch::tokenizer::append_token", tokenizer_append_token),
-    (
-        "torch::tokenizer::append_token_tensor",
-        tokenizer_append_token_tensor,
+        "flint::runtime::arg_int",
+        HostOp::Static(runtime::runtime_arg_int),
     ),
     (
-        "torch::tokenizer::clear_generated_tokens",
-        tokenizer_clear_generated_tokens,
+        "flint::runtime::arg_int_or",
+        HostOp::Static(runtime::runtime_arg_int_or),
     ),
     (
-        "torch::tokenizer::push_generated_token_tensor",
-        tokenizer_push_generated_token_tensor,
+        "flint::runtime::input",
+        HostOp::Static(runtime::runtime_input),
     ),
     (
-        "torch::tokenizer::decode_generated_tokens",
-        tokenizer_decode_generated_tokens,
+        "flint::runtime::set_output",
+        HostOp::Static(runtime::runtime_set_output),
     ),
-    ("torch::tokenizer::single_token", tokenizer_single_token),
-    ("torch::tokenizer::is_eos", tokenizer_is_eos),
-    ("torch::weights::load", weights_load),
-    ("torch::weights::get", weights_get),
-    ("torch::weights::get_or", weights_get_or),
-    ("torch::pair::new", pair_new),
-    ("torch::pair::local", pair_local),
-    ("torch::pair::global", pair_global),
-    ("torch::tensor::size", tensor_size),
-    ("torch::tensor::shape", tensor_shape),
-    ("torch::tensor::to_float", tensor_to_float),
-    ("torch::tensor::to_bfloat16", tensor_to_bfloat16),
-    ("torch::tensor::ones_like", tensor_ones_like),
-    ("torch::tensor::arange", tensor_arange),
-    ("torch::tensor::causal_mask", tensor_causal_mask),
-    ("torch::tensor::rope_cos", tensor_rope_cos),
-    ("torch::tensor::rope_sin", tensor_rope_sin),
-    ("torch::tensor::rope_cos_at", tensor_rope_cos_at),
-    ("torch::tensor::rope_sin_at", tensor_rope_sin_at),
-    ("torch::tensor::add", tensor_add),
-    ("torch::tensor::sub", tensor_sub),
-    ("torch::tensor::mul", tensor_mul),
-    ("torch::tensor::add_scalar", tensor_add_scalar),
-    ("torch::tensor::mul_scalar", tensor_mul_scalar),
-    ("torch::tensor::div_scalar", tensor_div_scalar),
-    ("torch::tensor::pow_scalar", tensor_pow_scalar),
-    ("torch::tensor::mean_dim", tensor_mean_dim),
-    ("torch::tensor::rsqrt", tensor_rsqrt),
-    ("torch::tensor::neg", tensor_neg),
-    ("torch::tensor::cos", tensor_cos),
-    ("torch::tensor::sin", tensor_sin),
-    ("torch::tensor::matmul", tensor_matmul),
-    ("torch::tensor::softmax", tensor_softmax),
-    ("torch::tensor::masked_fill", tensor_masked_fill),
-    ("torch::tensor::cat2", tensor_cat2),
-    ("torch::tensor::stack2", tensor_stack2),
-    ("torch::tensor::chunk", tensor_chunk),
-    ("torch::tensor::narrow", tensor_narrow),
-    ("torch::tensor::tail", tensor_tail),
-    ("torch::tensor::transpose", tensor_transpose),
-    ("torch::tensor::unsqueeze", tensor_unsqueeze),
-    ("torch::tensor::repeat_interleave", tensor_repeat_interleave),
-    ("torch::tensor::argmax_int", tensor_argmax_int),
-    ("torch::tensor::argmax_token", tensor_argmax_token),
-    ("torch::tensor::pad_reflect2d", tensor_pad_reflect2d),
-    ("torch::tensor::relu", tensor_relu),
-    ("torch::tensor::sigmoid", tensor_sigmoid),
-    ("torch::tensor::silu", tensor_silu),
-    ("torch::tensor::swiglu", tensor_swiglu),
-    ("torch::tensor::contiguous", tensor_contiguous),
-    ("torch::tensor::permute3", tensor_permute3),
-    ("torch::tensor::permute4", tensor_permute4),
-    ("torch::tensor::permute5", tensor_permute5),
-    ("torch::tensor::view2", tensor_view2),
-    ("torch::tensor::view3", tensor_view3),
-    ("torch::tensor::view4", tensor_view4),
-    ("torch::tensor::view5", tensor_view5),
-    ("torch::tensor::select", tensor_select),
-    ("torch::tensor::real", tensor_real),
-    ("torch::tensor::imag", tensor_imag),
-    ("torch::tensor::complex", tensor_complex),
-    ("torch::tensor::fft_rfftn2", tensor_fft_rfftn2),
-    ("torch::tensor::fft_irfftn2", tensor_fft_irfftn2),
-    ("torch::tensor::avg_pool2d_2", tensor_avg_pool2d_2),
-    ("torch::nn::embedding", nn_embedding),
-    ("torch::nn::linear", nn_linear),
-    ("torch::nn::swiglu_linear", nn_swiglu_linear),
-    ("torch::nn::rms_norm", nn_rms_norm),
-    ("torch::nn::add_rms_norm", nn_add_rms_norm),
-    ("torch::nn::apply_rope", nn_apply_rope),
-    ("torch::nn::apply_rope_pair", nn_apply_rope_pair),
     (
-        "torch::nn::scaled_dot_product_attention",
-        nn_scaled_dot_product_attention,
+        "flint::runtime::set_text_output",
+        HostOp::Static(runtime::runtime_set_text_output),
     ),
-    ("torch::nn::conv1d", nn_conv1d),
-    ("torch::nn::conv1d_step", nn_conv1d_step),
-    ("torch::nn::conv2d", nn_conv2d),
-    ("torch::nn::conv_transpose2d", nn_conv_transpose2d),
-    ("torch::nn::batch_norm2d", nn_batch_norm2d),
+    (
+        "flint::runtime::start_timer",
+        HostOp::Static(runtime::runtime_start_timer),
+    ),
+    (
+        "flint::runtime::start_decode_timer",
+        HostOp::Static(runtime::runtime_start_decode_timer),
+    ),
+    (
+        "flint::runtime::set_token_count",
+        HostOp::Static(runtime::runtime_set_token_count),
+    ),
+    (
+        "flint::runtime::set_decode_token_count",
+        HostOp::Static(runtime::runtime_set_decode_token_count),
+    ),
+    (
+        "flint::runtime::compact2",
+        HostOp::Static(runtime::runtime_compact2),
+    ),
+    ("flint::cache::clear", HostOp::Static(cache::cache_clear)),
+    ("flint::cache::has", HostOp::Static(cache::cache_has)),
+    ("flint::cache::get", HostOp::Static(cache::cache_get)),
+    ("flint::cache::set", HostOp::Static(cache::cache_set)),
+    ("flint::tokenizer::load", HostOp::Context(tokenizer_load)),
+    (
+        "flint::tokenizer::encode_chat",
+        HostOp::Context(tokenizer_encode_chat),
+    ),
+    (
+        "flint::tokenizer::decode_generated",
+        HostOp::Context(tokenizer_decode_generated),
+    ),
+    (
+        "flint::tokenizer::append_token",
+        HostOp::Context(tokenizer_append_token),
+    ),
+    (
+        "flint::tokenizer::append_token_tensor",
+        HostOp::Context(tokenizer_append_token_tensor),
+    ),
+    (
+        "flint::tokenizer::clear_generated_tokens",
+        HostOp::Context(tokenizer_clear_generated_tokens),
+    ),
+    (
+        "flint::tokenizer::push_generated_token_tensor",
+        HostOp::Context(tokenizer_push_generated_token_tensor),
+    ),
+    (
+        "flint::tokenizer::decode_generated_tokens",
+        HostOp::Context(tokenizer_decode_generated_tokens),
+    ),
+    (
+        "flint::tokenizer::single_token",
+        HostOp::Context(tokenizer_single_token),
+    ),
+    (
+        "flint::tokenizer::is_eos",
+        HostOp::Context(tokenizer_is_eos),
+    ),
+    ("flint::weights::load", HostOp::Context(weights_load)),
+    ("flint::weights::get", HostOp::Context(weights_get)),
+    ("flint::weights::get_or", HostOp::Context(weights_get_or)),
+    ("flint::pair::new", HostOp::Static(pair::pair_new)),
+    ("flint::pair::local", HostOp::Static(pair::pair_local)),
+    ("flint::pair::global", HostOp::Static(pair::pair_global)),
+    ("flint::tensor::size", HostOp::Context(tensor_size)),
+    ("flint::tensor::shape", HostOp::Context(tensor_shape)),
+    ("flint::tensor::to_float", HostOp::Context(tensor_to_float)),
+    (
+        "flint::tensor::to_bfloat16",
+        HostOp::Context(tensor_to_bfloat16),
+    ),
+    (
+        "flint::tensor::ones_like",
+        HostOp::Context(tensor_ones_like),
+    ),
+    ("flint::tensor::arange", HostOp::Context(tensor_arange)),
+    (
+        "flint::tensor::causal_mask",
+        HostOp::Context(tensor_causal_mask),
+    ),
+    ("flint::tensor::rope_cos", HostOp::Context(tensor_rope_cos)),
+    ("flint::tensor::rope_sin", HostOp::Context(tensor_rope_sin)),
+    (
+        "flint::tensor::rope_cos_at",
+        HostOp::Context(tensor_rope_cos_at),
+    ),
+    (
+        "flint::tensor::rope_sin_at",
+        HostOp::Context(tensor_rope_sin_at),
+    ),
+    ("flint::tensor::add", HostOp::Context(tensor_add)),
+    ("flint::tensor::sub", HostOp::Context(tensor_sub)),
+    ("flint::tensor::mul", HostOp::Context(tensor_mul)),
+    (
+        "flint::tensor::add_scalar",
+        HostOp::Context(tensor_add_scalar),
+    ),
+    (
+        "flint::tensor::mul_scalar",
+        HostOp::Context(tensor_mul_scalar),
+    ),
+    (
+        "flint::tensor::div_scalar",
+        HostOp::Context(tensor_div_scalar),
+    ),
+    (
+        "flint::tensor::pow_scalar",
+        HostOp::Context(tensor_pow_scalar),
+    ),
+    ("flint::tensor::mean_dim", HostOp::Context(tensor_mean_dim)),
+    ("flint::tensor::rsqrt", HostOp::Context(tensor_rsqrt)),
+    ("flint::tensor::neg", HostOp::Context(tensor_neg)),
+    ("flint::tensor::cos", HostOp::Context(tensor_cos)),
+    ("flint::tensor::sin", HostOp::Context(tensor_sin)),
+    ("flint::tensor::matmul", HostOp::Context(tensor_matmul)),
+    ("flint::tensor::softmax", HostOp::Context(tensor_softmax)),
+    (
+        "flint::tensor::masked_fill",
+        HostOp::Context(tensor_masked_fill),
+    ),
+    ("flint::tensor::cat2", HostOp::Context(tensor_cat2)),
+    ("flint::tensor::stack2", HostOp::Context(tensor_stack2)),
+    ("flint::tensor::chunk", HostOp::Context(tensor_chunk)),
+    ("flint::tensor::narrow", HostOp::Context(tensor_narrow)),
+    ("flint::tensor::tail", HostOp::Context(tensor_tail)),
+    (
+        "flint::tensor::transpose",
+        HostOp::Context(tensor_transpose),
+    ),
+    (
+        "flint::tensor::unsqueeze",
+        HostOp::Context(tensor_unsqueeze),
+    ),
+    (
+        "flint::tensor::repeat_interleave",
+        HostOp::Context(tensor_repeat_interleave),
+    ),
+    (
+        "flint::tensor::argmax_int",
+        HostOp::Context(tensor_argmax_int),
+    ),
+    (
+        "flint::tensor::argmax_token",
+        HostOp::Context(tensor_argmax_token),
+    ),
+    (
+        "flint::tensor::pad_reflect2d",
+        HostOp::Context(tensor_pad_reflect2d),
+    ),
+    ("flint::tensor::relu", HostOp::Context(tensor_relu)),
+    ("flint::tensor::sigmoid", HostOp::Context(tensor_sigmoid)),
+    ("flint::tensor::silu", HostOp::Context(tensor_silu)),
+    ("flint::tensor::swiglu", HostOp::Context(tensor_swiglu)),
+    (
+        "flint::tensor::contiguous",
+        HostOp::Context(tensor_contiguous),
+    ),
+    ("flint::tensor::permute3", HostOp::Context(tensor_permute3)),
+    ("flint::tensor::permute4", HostOp::Context(tensor_permute4)),
+    ("flint::tensor::permute5", HostOp::Context(tensor_permute5)),
+    ("flint::tensor::view2", HostOp::Context(tensor_view2)),
+    ("flint::tensor::view3", HostOp::Context(tensor_view3)),
+    ("flint::tensor::view4", HostOp::Context(tensor_view4)),
+    ("flint::tensor::view5", HostOp::Context(tensor_view5)),
+    ("flint::tensor::select", HostOp::Context(tensor_select)),
+    ("flint::tensor::real", HostOp::Context(tensor_real)),
+    ("flint::tensor::imag", HostOp::Context(tensor_imag)),
+    ("flint::tensor::complex", HostOp::Context(tensor_complex)),
+    (
+        "flint::tensor::fft_rfftn2",
+        HostOp::Context(tensor_fft_rfftn2),
+    ),
+    (
+        "flint::tensor::fft_irfftn2",
+        HostOp::Context(tensor_fft_irfftn2),
+    ),
+    (
+        "flint::tensor::avg_pool2d_2",
+        HostOp::Context(tensor_avg_pool2d_2),
+    ),
+    ("flint::nn::embedding", HostOp::Context(nn_embedding)),
+    ("flint::nn::linear", HostOp::Context(nn_linear)),
+    (
+        "flint::nn::swiglu_linear",
+        HostOp::Context(nn_swiglu_linear),
+    ),
+    ("flint::nn::rms_norm", HostOp::Context(nn_rms_norm)),
+    ("flint::nn::add_rms_norm", HostOp::Context(nn_add_rms_norm)),
+    ("flint::nn::apply_rope", HostOp::Context(nn_apply_rope)),
+    (
+        "flint::nn::apply_rope_pair",
+        HostOp::Context(nn_apply_rope_pair),
+    ),
+    (
+        "flint::nn::scaled_dot_product_attention",
+        HostOp::Context(nn_scaled_dot_product_attention),
+    ),
+    ("flint::nn::conv1d", HostOp::Context(nn_conv1d)),
+    ("flint::nn::conv1d_step", HostOp::Context(nn_conv1d_step)),
+    ("flint::nn::conv2d", HostOp::Context(nn_conv2d)),
+    (
+        "flint::nn::conv_transpose2d",
+        HostOp::Context(nn_conv_transpose2d),
+    ),
+    ("flint::nn::batch_norm2d", HostOp::Context(nn_batch_norm2d)),
 ];
 
 fn host_error(message: impl Into<String>) -> VmError {
@@ -557,6 +712,84 @@ fn string_arg<'a>(args: &'a [Value], index: usize, label: &str) -> VmResult<&'a 
     }
 }
 
+trait BorrowHostArg<'a>: Sized {
+    fn borrow_host_arg(value: &'a Value, label: &str) -> VmResult<Self>;
+
+    fn missing_host_arg(label: &str) -> VmResult<Self> {
+        Err(host_error(format!("missing argument '{label}'")))
+    }
+}
+
+fn borrow_arg<'a, T>(args: &'a [Value], index: usize, label: &str) -> VmResult<T>
+where
+    T: BorrowHostArg<'a>,
+{
+    match args.get(index) {
+        Some(value) => T::borrow_host_arg(value, label),
+        None => T::missing_host_arg(label),
+    }
+}
+
+#[allow(dead_code)]
+fn take_arg<'a, T>(args: &'a mut [Value], index: usize, label: &str) -> VmResult<T>
+where
+    T: BorrowHostArg<'a>,
+{
+    borrow_arg(args, index, label)
+}
+
+impl BorrowHostArg<'_> for i64 {
+    fn borrow_host_arg(value: &Value, _label: &str) -> VmResult<Self> {
+        match value {
+            Value::Int(value) => Ok(*value),
+            _ => Err(VmError::TypeMismatch("int")),
+        }
+    }
+}
+
+impl BorrowHostArg<'_> for bool {
+    fn borrow_host_arg(value: &Value, _label: &str) -> VmResult<Self> {
+        match value {
+            Value::Bool(value) => Ok(*value),
+            _ => Err(VmError::TypeMismatch("bool")),
+        }
+    }
+}
+
+impl BorrowHostArg<'_> for f64 {
+    fn borrow_host_arg(value: &Value, _label: &str) -> VmResult<Self> {
+        match value {
+            Value::Float(value) => Ok(*value),
+            Value::Int(value) => Ok(*value as f64),
+            _ => Err(VmError::TypeMismatch("float")),
+        }
+    }
+}
+
+impl<'a> BorrowHostArg<'a> for &'a str {
+    fn borrow_host_arg(value: &'a Value, _label: &str) -> VmResult<Self> {
+        match value {
+            Value::String(value) => Ok(value.as_str()),
+            _ => Err(VmError::TypeMismatch("string")),
+        }
+    }
+}
+
+impl BorrowHostArg<'_> for String {
+    fn borrow_host_arg(value: &Value, _label: &str) -> VmResult<Self> {
+        match value {
+            Value::String(value) => Ok(value.to_string()),
+            _ => Err(VmError::TypeMismatch("string")),
+        }
+    }
+}
+
+impl BorrowHostArg<'_> for Value {
+    fn borrow_host_arg(value: &Value, _label: &str) -> VmResult<Self> {
+        Ok(value.clone())
+    }
+}
+
 fn return_value(value: Value) -> VmResult<CallOutcome> {
     Ok(CallOutcome::Return(CallReturn::one(value)))
 }
@@ -567,52 +800,6 @@ fn return_int(value: i64) -> VmResult<CallOutcome> {
 
 fn return_tensor(context: &mut TorchContext, tensor: Tensor) -> VmResult<CallOutcome> {
     return_int(context.insert_tensor(tensor))
-}
-
-fn runtime_input(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
-    let index = usize::try_from(int_arg(args, 0, "index")?)
-        .map_err(|_| host_error("input index must be non-negative"))?;
-    let handle = *context
-        .inputs
-        .get(index)
-        .ok_or_else(|| host_error(format!("unknown input index {index}")))?;
-    return_int(handle)
-}
-
-fn runtime_arg(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
-    let index = usize::try_from(int_arg(args, 0, "index")?)
-        .map_err(|_| host_error("argument index must be non-negative"))?;
-    let value = context
-        .args
-        .get(index)
-        .ok_or_else(|| host_error(format!("unknown runtime argument {index}")))?
-        .clone();
-    return_value(Value::String(value.into()))
-}
-
-fn runtime_arg_int(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
-    let index = usize::try_from(int_arg(args, 0, "index")?)
-        .map_err(|_| host_error("argument index must be non-negative"))?;
-    let value = context
-        .args
-        .get(index)
-        .ok_or_else(|| host_error(format!("unknown runtime argument {index}")))?
-        .parse::<i64>()
-        .map_err(|err| host_error(format!("runtime argument {index} is not an int: {err}")))?;
-    return_int(value)
-}
-
-fn runtime_arg_int_or(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
-    let index = usize::try_from(int_arg(args, 0, "index")?)
-        .map_err(|_| host_error("argument index must be non-negative"))?;
-    let default = int_arg(args, 1, "default")?;
-    let Some(value) = context.args.get(index) else {
-        return return_int(default);
-    };
-    let value = value
-        .parse::<i64>()
-        .map_err(|err| host_error(format!("runtime argument {index} is not an int: {err}")))?;
-    return_int(value)
 }
 
 fn weights_load(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
@@ -722,112 +909,6 @@ fn get_or_build_weight(context: &mut TorchContext, name: &str) -> VmResult<Tenso
         .weights
         .insert(name.to_owned(), tensor.shallow_clone());
     Ok(tensor)
-}
-
-fn runtime_set_output(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
-    let handle = int_arg(args, 0, "tensor")?;
-    context.tensor(handle)?;
-    context.output = Some(handle);
-    return_value(Value::Bool(true))
-}
-
-fn runtime_set_text_output(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
-    let text = string_arg(args, 0, "text")?.to_owned();
-    context.text_output = Some(text);
-    return_value(Value::Bool(true))
-}
-
-fn runtime_start_timer(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
-    if !args.is_empty() {
-        return Err(host_error("start_timer takes no arguments"));
-    }
-    context.generation_started_at = Some(Instant::now());
-    context.generated_tokens = None;
-    context.decode_started_at = None;
-    context.decode_tokens = None;
-    context.generated_token_tensors.clear();
-    return_value(Value::Bool(true))
-}
-
-fn runtime_start_decode_timer(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
-    if !args.is_empty() {
-        return Err(host_error("start_decode_timer takes no arguments"));
-    }
-    context.decode_started_at = Some(Instant::now());
-    context.decode_tokens = None;
-    return_value(Value::Bool(true))
-}
-
-fn runtime_set_token_count(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
-    let generated_tokens = int_arg(args, 0, "generated tokens")?;
-    if generated_tokens < 0 {
-        return Err(host_error("generated token count must be non-negative"));
-    }
-    context.generated_tokens = Some(generated_tokens);
-    return_value(Value::Bool(true))
-}
-
-fn runtime_set_decode_token_count(
-    context: &mut TorchContext,
-    args: &[Value],
-) -> VmResult<CallOutcome> {
-    let decode_tokens = int_arg(args, 0, "decode tokens")?;
-    if decode_tokens < 0 {
-        return Err(host_error("decode token count must be non-negative"));
-    }
-    context.decode_tokens = Some(decode_tokens);
-    return_value(Value::Bool(true))
-}
-
-fn runtime_compact2(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
-    let first = int_arg(args, 0, "first")?;
-    let second = int_arg(args, 1, "second")?;
-    let mut keep = HashSet::new();
-    keep.insert(first);
-    keep.insert(second);
-    keep.extend(context.inputs.iter().copied());
-    keep.extend(context.weight_handles.values().copied());
-    if let Some(output) = context.output {
-        keep.insert(output);
-    }
-    context.tensors.retain(|handle, _| keep.contains(handle));
-    context.pairs.clear();
-    context
-        .weight_handles
-        .retain(|_, handle| context.tensors.contains_key(handle));
-    let count = i64::try_from(context.tensors.len())
-        .map_err(|_| host_error("tensor count exceeds RustScript integer range"))?;
-    return_int(count)
-}
-
-fn cache_clear(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
-    if !args.is_empty() {
-        return Err(host_error("cache clear takes no arguments"));
-    }
-    context.cache.clear();
-    return_value(Value::Bool(true))
-}
-
-fn cache_has(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
-    let name = string_arg(args, 0, "name")?;
-    return_value(Value::Bool(context.cache.contains_key(name)))
-}
-
-fn cache_get(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
-    let name = string_arg(args, 0, "name")?;
-    let tensor = context
-        .cache
-        .get(name)
-        .ok_or_else(|| host_error(format!("missing cache tensor '{name}'")))?
-        .shallow_clone();
-    return_tensor(context, tensor)
-}
-
-fn cache_set(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
-    let name = string_arg(args, 0, "name")?.to_owned();
-    let tensor = context.tensor(int_arg(args, 1, "tensor")?)?.shallow_clone();
-    context.cache.insert(name, tensor);
-    return_value(Value::Bool(true))
 }
 
 fn tokenizer_load(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
@@ -973,24 +1054,6 @@ fn tokenizer_single_token(context: &mut TorchContext, args: &[Value]) -> VmResul
 fn tokenizer_is_eos(_context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
     let token = int_arg(args, 0, "token")?;
     return_value(Value::Bool(token == 7))
-}
-
-fn pair_new(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
-    let local = int_arg(args, 0, "local")?;
-    let global = int_arg(args, 1, "global")?;
-    context.tensor(local)?;
-    if global != 0 {
-        context.tensor(global)?;
-    }
-    return_int(context.insert_pair(FfcPair { local, global }))
-}
-
-fn pair_local(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
-    return_int(context.pair(int_arg(args, 0, "pair")?)?.local)
-}
-
-fn pair_global(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {
-    return_int(context.pair(int_arg(args, 0, "pair")?)?.global)
 }
 
 fn tensor_size(context: &mut TorchContext, args: &[Value]) -> VmResult<CallOutcome> {

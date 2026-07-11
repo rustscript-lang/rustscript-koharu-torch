@@ -1101,6 +1101,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "flint-ai"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "image",
+ "imageproc",
+ "koharu-runtime",
+ "koharu-torch",
+ "pd-host-function",
+ "pd-vm",
+ "tempfile",
+ "tokenizers",
+ "tokio",
+]
+
+[[package]]
 name = "float8"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3194,22 +3211,6 @@ dependencies = [
  "ring",
  "rustls-pki-types",
  "untrusted",
-]
-
-[[package]]
-name = "rustscript-koharu-torch"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "image",
- "imageproc",
- "koharu-runtime",
- "koharu-torch",
- "pd-vm",
- "tempfile",
- "tokenizers",
- "tokio",
 ]
 
 [[package]]

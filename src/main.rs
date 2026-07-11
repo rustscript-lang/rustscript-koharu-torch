@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
-use rustscript_koharu_torch::{TorchScriptRunner, parse_device};
+use flint_ai::{TorchScriptRunner, parse_device};
 use vm::compile_source;
 
 #[derive(Debug, Parser)]

@@ -1,44 +1,44 @@
-use torch;
-let weights_path: string = torch::runtime::arg(0);
-let tokenizer_path: string = torch::runtime::arg(1);
-let system_prompt: string = torch::runtime::arg(2);
-let source_text: string = torch::runtime::arg(3);
-let max_new_tokens: int = torch::runtime::arg_int(4);
-let ignore_eos: int = torch::runtime::arg_int_or(5, 0);
-torch::weights::load(weights_path);
-torch::tokenizer::load(tokenizer_path);
+use flint;
+let weights_path: string = flint::runtime::arg(0);
+let tokenizer_path: string = flint::runtime::arg(1);
+let system_prompt: string = flint::runtime::arg(2);
+let source_text: string = flint::runtime::arg(3);
+let max_new_tokens: int = flint::runtime::arg_int(4);
+let ignore_eos: int = flint::runtime::arg_int_or(5, 0);
+flint::weights::load(weights_path);
+flint::tokenizer::load(tokenizer_path);
 fn weight(name: string) -> int {
-    torch::weights::get(name)
+    flint::weights::get(name)
 }
 fn linear(input: int, weight_handle: int) -> int {
-    torch::nn::linear(input, weight_handle, 0)
+    flint::nn::linear(input, weight_handle, 0)
 }
 fn rms_norm(input: int, weight_handle: int) -> int {
-    torch::nn::rms_norm(input, weight_handle, 0.00001)
+    flint::nn::rms_norm(input, weight_handle, 0.00001)
 }
 fn add_rms_norm(input: int, residual: int, weight_handle: int) -> int {
-    torch::nn::add_rms_norm(input, residual, weight_handle, 0.00001)
+    flint::nn::add_rms_norm(input, residual, weight_handle, 0.00001)
 }
 fn rotate_half(input: int) -> int {
-    let head_dim: int = torch::tensor::size(input, -1);
+    let head_dim: int = flint::tensor::size(input, -1);
     let half = head_dim / 2;
-    let first: int = torch::tensor::narrow(input, -1, 0, half);
-    let second: int = torch::tensor::narrow(input, -1, half, half);
-    let neg_second: int = torch::tensor::neg(second);
-    torch::tensor::cat2(neg_second, first, -1)
+    let first: int = flint::tensor::narrow(input, -1, 0, half);
+    let second: int = flint::tensor::narrow(input, -1, half, half);
+    let neg_second: int = flint::tensor::neg(second);
+    flint::tensor::cat2(neg_second, first, -1)
 }
 fn apply_rope(input: int, cos: int, sin: int) -> int {
-    torch::nn::apply_rope(input, cos, sin)
+    flint::nn::apply_rope(input, cos, sin)
 }
 fn apply_rope_pair(query: int, key: int, cos: int, sin: int) -> int {
-    torch::nn::apply_rope_pair(query, key, cos, sin)
+    flint::nn::apply_rope_pair(query, key, cos, sin)
 }
 fn repeat_kv(input: int) -> int {
-    torch::tensor::repeat_interleave(input, 2, 1)
+    flint::tensor::repeat_interleave(input, 2, 1)
 }
 let embed_weight: int = weight("model.embed_tokens.weight");
 let embedding_norm_weight: int = weight("model.embedding_norm.weight");
-let lm_head_weight: int = torch::weights::get_or("lm_head.weight", "model.embed_tokens.weight");
+let lm_head_weight: int = flint::weights::get_or("lm_head.weight", "model.embed_tokens.weight");
 let operator_norm_weights: [int] = [
     weight("model.layers.0.operator_norm.weight"),
     weight("model.layers.1.operator_norm.weight"),
@@ -245,49 +245,49 @@ fn attention_mixer(
     cos: int,
     sin: int
 ) -> int {
-    let batch: int = torch::tensor::size(input, 0);
-    let seq_len: int = torch::tensor::size(input, 1);
+    let batch: int = flint::tensor::size(input, 0);
+    let seq_len: int = flint::tensor::size(input, 1);
     let hidden = rms_norm(input, operator_norm_weights.copy()[layer]);
     let qkv_linear = linear(hidden, qkv_weights.copy()[layer]);
-    let q_linear: int = torch::tensor::narrow(qkv_linear, -1, 0, 1024);
-    let k_linear: int = torch::tensor::narrow(qkv_linear, -1, 1024, 512);
-    let v_linear: int = torch::tensor::narrow(qkv_linear, -1, 1536, 512);
-    let q_view: int = torch::tensor::view4(q_linear, batch, seq_len, 16, 64);
-    let k_view: int = torch::tensor::view4(k_linear, batch, seq_len, 8, 64);
-    let v_view: int = torch::tensor::view4(v_linear, batch, seq_len, 8, 64);
+    let q_linear: int = flint::tensor::narrow(qkv_linear, -1, 0, 1024);
+    let k_linear: int = flint::tensor::narrow(qkv_linear, -1, 1024, 512);
+    let v_linear: int = flint::tensor::narrow(qkv_linear, -1, 1536, 512);
+    let q_view: int = flint::tensor::view4(q_linear, batch, seq_len, 16, 64);
+    let k_view: int = flint::tensor::view4(k_linear, batch, seq_len, 8, 64);
+    let v_view: int = flint::tensor::view4(v_linear, batch, seq_len, 8, 64);
     let q_norm = rms_norm(q_view, q_norm_weights.copy()[layer]);
     let k_norm = rms_norm(k_view, k_norm_weights.copy()[layer]);
-    let q_heads: int = torch::tensor::transpose(q_norm, 1, 2);
-    let k_heads: int = torch::tensor::transpose(k_norm, 1, 2);
-    let v_heads: int = torch::tensor::transpose(v_view, 1, 2);
+    let q_heads: int = flint::tensor::transpose(q_norm, 1, 2);
+    let k_heads: int = flint::tensor::transpose(k_norm, 1, 2);
+    let v_heads: int = flint::tensor::transpose(v_view, 1, 2);
     let qk_rot = apply_rope_pair(q_heads, k_heads, cos, sin);
-    let q_rot: int = torch::pair::local(qk_rot);
-    let k_rot: int = torch::pair::global(qk_rot);
+    let q_rot: int = flint::pair::local(qk_rot);
+    let k_rot: int = flint::pair::global(qk_rot);
     let k_cache_name = prefix + ".self_attn.k_cache";
     let v_cache_name = prefix + ".self_attn.v_cache";
     let mut k_all = k_rot;
     let mut v_all = v_heads;
     if incremental {
-        let old_k: int = torch::cache::get(k_cache_name);
-        let old_v: int = torch::cache::get(v_cache_name);
-        let k_cat: int = torch::tensor::cat2(old_k, k_rot, 2);
-        let v_cat: int = torch::tensor::cat2(old_v, v_heads, 2);
+        let old_k: int = flint::cache::get(k_cache_name);
+        let old_v: int = flint::cache::get(v_cache_name);
+        let k_cat: int = flint::tensor::cat2(old_k, k_rot, 2);
+        let v_cat: int = flint::tensor::cat2(old_v, v_heads, 2);
         k_all = k_cat;
         v_all = v_cat;
     }
-    torch::cache::set(k_cache_name, k_all);
-    torch::cache::set(v_cache_name, v_all);
+    flint::cache::set(k_cache_name, k_all);
+    flint::cache::set(v_cache_name, v_all);
     let k_full = repeat_kv(k_all);
     let v_full = repeat_kv(v_all);
-    let attended: int = torch::nn::scaled_dot_product_attention(
+    let attended: int = flint::nn::scaled_dot_product_attention(
         q_rot,
         k_full,
         v_full,
         !incremental
     );
-    let transposed: int = torch::tensor::transpose(attended, 1, 2);
-    let contiguous: int = torch::tensor::contiguous(transposed);
-    let merged: int = torch::tensor::view3(
+    let transposed: int = flint::tensor::transpose(attended, 1, 2);
+    let contiguous: int = flint::tensor::contiguous(transposed);
+    let merged: int = flint::tensor::view3(
         contiguous,
         batch,
         seq_len,
@@ -296,26 +296,26 @@ fn attention_mixer(
     linear(merged, attention_out_weights.copy()[layer])
 }
 fn conv_mixer(input: int, prefix: string, layer: int, incremental: bool) -> int {
-    let seq_len: int = torch::tensor::size(input, 1);
+    let seq_len: int = flint::tensor::size(input, 1);
     let hidden = rms_norm(input, operator_norm_weights.copy()[layer]);
-    let projected: int = torch::tensor::transpose(
+    let projected: int = flint::tensor::transpose(
         linear(hidden, conv_in_weights.copy()[layer]),
         -1,
         -2
     );
-    let b_part: int = torch::tensor::narrow(projected, 1, 0, 1024);
-    let c_part: int = torch::tensor::narrow(projected, 1, 1024, 1024);
-    let x_part: int = torch::tensor::narrow(projected, 1, 2048, 1024);
-    let bx: int = torch::tensor::mul(b_part, x_part);
+    let b_part: int = flint::tensor::narrow(projected, 1, 0, 1024);
+    let c_part: int = flint::tensor::narrow(projected, 1, 1024, 1024);
+    let x_part: int = flint::tensor::narrow(projected, 1, 2048, 1024);
+    let bx: int = flint::tensor::mul(b_part, x_part);
     let state_name = prefix + ".conv.state";
     let conv_weight: int = conv_weights.copy()[layer];
     let conv_trimmed: int = if incremental => {
-        let old_state: int = torch::cache::get(state_name);
-        let step_result: int = torch::nn::conv1d_step(old_state, bx, conv_weight);
-        torch::cache::set(state_name, torch::pair::global(step_result));
-        torch::pair::local(step_result)
+        let old_state: int = flint::cache::get(state_name);
+        let step_result: int = flint::nn::conv1d_step(old_state, bx, conv_weight);
+        flint::cache::set(state_name, flint::pair::global(step_result));
+        flint::pair::local(step_result)
     } else => {
-        let conv_full: int = torch::nn::conv1d(
+        let conv_full: int = flint::nn::conv1d(
             bx,
             conv_weight,
             0,
@@ -324,29 +324,29 @@ fn conv_mixer(input: int, prefix: string, layer: int, incremental: bool) -> int 
             1,
             1024
         );
-        let state: int = torch::tensor::tail(bx, 2, 2);
-        torch::cache::set(state_name, state);
-        torch::tensor::narrow(conv_full, -1, 0, seq_len)
+        let state: int = flint::tensor::tail(bx, 2, 2);
+        flint::cache::set(state_name, state);
+        flint::tensor::narrow(conv_full, -1, 0, seq_len)
     };
-    let mixed: int = torch::tensor::transpose(
-        torch::tensor::mul(c_part, conv_trimmed),
+    let mixed: int = flint::tensor::transpose(
+        flint::tensor::mul(c_part, conv_trimmed),
         -1,
         -2
     );
-    let mixed_contiguous: int = torch::tensor::contiguous(mixed);
+    let mixed_contiguous: int = flint::tensor::contiguous(mixed);
     linear(mixed_contiguous, conv_out_weights.copy()[layer])
 }
 fn mlp(input: int, layer: int) -> int {
     let gate_up = linear(input, mlp_gate_up_weights.copy()[layer]);
     let down_weight: int = mlp_down_weights.copy()[layer];
-    torch::nn::swiglu_linear(gate_up, down_weight, 0)
+    flint::nn::swiglu_linear(gate_up, down_weight, 0)
 }
 fn finish_layer(input: int, layer: int, mixed: int) -> int {
     let hidden_norm = add_rms_norm(input, mixed, ffn_norm_weights.copy()[layer]);
-    let hidden: int = torch::pair::local(hidden_norm);
-    let ffn_input: int = torch::pair::global(hidden_norm);
+    let hidden: int = flint::pair::local(hidden_norm);
+    let ffn_input: int = flint::pair::global(hidden_norm);
     let feed_forward = mlp(ffn_input, layer);
-    torch::tensor::add(hidden, feed_forward)
+    flint::tensor::add(hidden, feed_forward)
 }
 fn conv_layer(input: int, prefix: string, layer: int, incremental: bool) -> int {
     let mixed = conv_mixer(input, prefix, layer, incremental);
@@ -364,10 +364,10 @@ fn attention_layer(
     finish_layer(input, layer, mixed)
 }
 fn model(input_ids: int, position: int, incremental: bool) -> int {
-    let embeddings: int = torch::nn::embedding(input_ids, embed_weight);
-    let seq_len: int = torch::tensor::size(input_ids, 1);
-    let cos: int = torch::tensor::rope_cos_at(seq_len, 64, 1000000.0, position);
-    let sin: int = torch::tensor::rope_sin_at(seq_len, 64, 1000000.0, position);
+    let embeddings: int = flint::nn::embedding(input_ids, embed_weight);
+    let seq_len: int = flint::tensor::size(input_ids, 1);
+    let cos: int = flint::tensor::rope_cos_at(seq_len, 64, 1000000.0, position);
+    let sin: int = flint::tensor::rope_sin_at(seq_len, 64, 1000000.0, position);
     let mut hidden = embeddings;
     hidden = conv_layer(hidden, "model.layers.0", 0, incremental);
     hidden = conv_layer(hidden, "model.layers.1", 1, incremental);
@@ -386,69 +386,69 @@ fn model(input_ids: int, position: int, incremental: bool) -> int {
     hidden = attention_layer(hidden, "model.layers.14", 14, incremental, cos, sin);
     hidden = conv_layer(hidden, "model.layers.15", 15, incremental);
     let normalized = rms_norm(hidden, embedding_norm_weight);
-    let seq_len: int = torch::tensor::size(normalized, 1);
-    let last_hidden: int = torch::tensor::select(normalized, 1, seq_len - 1);
-    torch::nn::linear(last_hidden, lm_head_weight, 0)
+    let seq_len: int = flint::tensor::size(normalized, 1);
+    let last_hidden: int = flint::tensor::select(normalized, 1, seq_len - 1);
+    flint::nn::linear(last_hidden, lm_head_weight, 0)
 }
-let prompt_tokens: int = torch::tokenizer::encode_chat(system_prompt, source_text);
-let prompt_len: int = torch::tensor::size(prompt_tokens, 1);
+let prompt_tokens: int = flint::tokenizer::encode_chat(system_prompt, source_text);
+let prompt_len: int = flint::tensor::size(prompt_tokens, 1);
 let mut tokens = prompt_tokens;
 let mut step = 0;
 let mut generated_tokens = 0;
 let mut decode_started = false;
-torch::cache::clear();
-torch::runtime::start_timer();
-torch::tokenizer::clear_generated_tokens();
+flint::cache::clear();
+flint::runtime::start_timer();
+flint::tokenizer::clear_generated_tokens();
 let mut logits = model(prompt_tokens, 0, false);
-torch::runtime::compact2(logits, tokens);
+flint::runtime::compact2(logits, tokens);
 if ignore_eos == 0 {
     while step < max_new_tokens {
-        let next_token: int = torch::tensor::argmax_int(logits, -1);
-        let appended: int = torch::tokenizer::append_token(tokens, next_token);
+        let next_token: int = flint::tensor::argmax_int(logits, -1);
+        let appended: int = flint::tokenizer::append_token(tokens, next_token);
         tokens = appended;
         generated_tokens = generated_tokens + 1;
         step = step + 1;
-        if torch::tokenizer::is_eos(next_token) {
+        if flint::tokenizer::is_eos(next_token) {
             break;
         }
         if step < max_new_tokens {
-            let decode_input: int = torch::tokenizer::single_token(next_token);
+            let decode_input: int = flint::tokenizer::single_token(next_token);
             let decode_position: int = prompt_len + generated_tokens - 1;
             if !decode_started {
-                torch::runtime::start_decode_timer();
+                flint::runtime::start_decode_timer();
                 decode_started = true;
             }
             logits = model(decode_input, decode_position, true);
-            torch::runtime::compact2(logits, tokens);
+            flint::runtime::compact2(logits, tokens);
         }
     }
 } else {
     while step < max_new_tokens {
-        let next_token: int = torch::tensor::argmax_token(logits, -1);
-        torch::tokenizer::push_generated_token_tensor(next_token);
+        let next_token: int = flint::tensor::argmax_token(logits, -1);
+        flint::tokenizer::push_generated_token_tensor(next_token);
         generated_tokens = generated_tokens + 1;
         step = step + 1;
         if step < max_new_tokens {
             let decode_position: int = prompt_len + generated_tokens - 1;
             if !decode_started {
-                torch::runtime::start_decode_timer();
+                flint::runtime::start_decode_timer();
                 decode_started = true;
             }
             logits = model(next_token, decode_position, true);
-            torch::runtime::compact2(logits, tokens);
+            flint::runtime::compact2(logits, tokens);
         }
     }
 }
 let output_text: string = if ignore_eos == 0 => {
-    torch::tokenizer::decode_generated(tokens, prompt_len)
+    flint::tokenizer::decode_generated(tokens, prompt_len)
 } else => {
-    torch::tokenizer::decode_generated_tokens()
+    flint::tokenizer::decode_generated_tokens()
 };
 let decode_tokens: int = if generated_tokens > 0 => {
     generated_tokens - 1
 } else => {
     0
 };
-torch::runtime::set_token_count(generated_tokens);
-torch::runtime::set_decode_token_count(decode_tokens);
-torch::runtime::set_text_output(output_text);
+flint::runtime::set_token_count(generated_tokens);
+flint::runtime::set_decode_token_count(decode_tokens);
+flint::runtime::set_text_output(output_text);

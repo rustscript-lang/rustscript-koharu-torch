@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use flint_ai::{parse_device, preload_libtorch};
 use koharu_torch::{Cuda, Device, Kind, Tensor};
-use rustscript_koharu_torch::{parse_device, preload_libtorch};
 use tokenizers::Tokenizer;
 
 #[derive(Debug, Parser)]
